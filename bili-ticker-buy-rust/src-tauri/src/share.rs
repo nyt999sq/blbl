@@ -88,6 +88,20 @@ pub struct ShareSubmissionSummary {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct ShareSubmissionExportConfig {
+    pub version: u32,
+    pub source: String,
+    pub ticket_info: TicketInfo,
+    pub interval: u64,
+    pub mode: u32,
+    pub total_attempts: u32,
+    pub time_start: Option<String>,
+    pub proxy: Option<String>,
+    pub time_offset: Option<f64>,
+    pub ntp_server: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct SharePresetRecord {
     pub id: String,
     pub token_hash: String,
@@ -103,6 +117,8 @@ pub struct SharePresetRecord {
     pub locked_task: LockedTaskConfig,
     pub display_snapshot: ShareDisplaySnapshot,
     pub last_submission: Option<ShareSubmissionSummary>,
+    #[serde(default)]
+    pub last_submission_export: Option<ShareSubmissionExportConfig>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -293,6 +309,24 @@ pub fn build_ticket_info_from_submission(
     })
 }
 
+pub fn build_share_submission_export_config(
+    ticket_info: TicketInfo,
+    locked_task: &LockedTaskConfig,
+) -> ShareSubmissionExportConfig {
+    ShareSubmissionExportConfig {
+        version: 1,
+        source: "share_submission".to_string(),
+        ticket_info,
+        interval: locked_task.interval,
+        mode: locked_task.mode,
+        total_attempts: locked_task.total_attempts,
+        time_start: locked_task.time_start.clone(),
+        proxy: locked_task.proxy.clone(),
+        time_offset: None,
+        ntp_server: locked_task.ntp_server.clone(),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -345,6 +379,7 @@ mod tests {
                 tips: vec!["只需填写个人信息".to_string()],
             },
             last_submission: None,
+            last_submission_export: None,
         };
 
         assert_eq!(effective_share_status(&preset, 121), SharePresetStatus::Expired);
@@ -431,6 +466,7 @@ mod tests {
                 tips: vec![],
             },
             last_submission: None,
+            last_submission_export: None,
         };
 
         let error = validate_share_preset_batch_delete(
@@ -486,6 +522,7 @@ mod tests {
             locked_task: base.clone(),
             display_snapshot: display.clone(),
             last_submission: None,
+            last_submission_export: None,
         };
         let closed = SharePresetRecord {
             id: "closed".to_string(),
@@ -501,6 +538,7 @@ mod tests {
             locked_task: base,
             display_snapshot: display,
             last_submission: None,
+            last_submission_export: None,
         };
 
         let result = validate_share_preset_batch_delete(
@@ -511,5 +549,47 @@ mod tests {
         .unwrap();
 
         assert_eq!(result, vec!["completed".to_string(), "closed".to_string()]);
+    }
+
+    #[test]
+    fn export_config_keeps_ticket_info_and_locked_runtime_options() {
+        let ticket_info = TicketInfo {
+            project_id: "1".to_string(),
+            project_name: Some("项目".to_string()),
+            screen_id: "2".to_string(),
+            sku_id: "3".to_string(),
+            count: 1,
+            buyer_info: json!([{"id":"buyer-1"}]),
+            deliver_info: json!({"addr_id":"addr-1"}),
+            cookies: vec!["SESSDATA=abc".to_string()],
+            is_hot_project: Some(false),
+            pay_money: Some(100),
+            contact_name: Some("联系人".to_string()),
+            contact_tel: Some("13800000000".to_string()),
+        };
+        let locked_task = LockedTaskConfig {
+            project_id: "1".to_string(),
+            project_name: "项目".to_string(),
+            screen_id: "2".to_string(),
+            screen_name: "场次".to_string(),
+            sku_id: "3".to_string(),
+            sku_name: "票档".to_string(),
+            count: 1,
+            pay_money: 100,
+            is_hot_project: false,
+            time_start: Some("2026-03-12 20:00:00".to_string()),
+            interval: 800,
+            mode: 1,
+            total_attempts: 10,
+            proxy: Some("http://127.0.0.1:7890".to_string()),
+            ntp_server: Some("ntp.aliyun.com".to_string()),
+        };
+
+        let export = build_share_submission_export_config(ticket_info.clone(), &locked_task);
+
+        assert_eq!(export.ticket_info, ticket_info);
+        assert_eq!(export.interval, 800);
+        assert_eq!(export.mode, 1);
+        assert_eq!(export.time_start.as_deref(), Some("2026-03-12 20:00:00"));
     }
 }

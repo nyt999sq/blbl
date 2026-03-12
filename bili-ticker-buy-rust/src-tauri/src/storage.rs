@@ -316,6 +316,7 @@ mod tests {
                 tips: vec!["只需填写个人信息".to_string()],
             },
             last_submission: None,
+            last_submission_export: None,
         }];
 
         save_share_presets(&presets).expect("save share presets");

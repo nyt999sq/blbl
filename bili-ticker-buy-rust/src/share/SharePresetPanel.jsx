@@ -1,9 +1,10 @@
 import { useEffect, useState } from "react";
-import { Copy, Link2, Lock, RefreshCw, ShieldCheck, XCircle } from "lucide-react";
+import { Copy, Download, Link2, Lock, RefreshCw, ShieldCheck, XCircle } from "lucide-react";
 import {
   batchDeleteSharePresets,
   closeSharePreset,
   createSharePreset,
+  exportSharePresetConfig,
   listSharePresets,
 } from "../platform/apiClient";
 import { copyText } from "../utils/clipboard";
@@ -149,6 +150,23 @@ export default function SharePresetPanel({
       alert("批量删除成功");
     } catch (error) {
       alert(`批量删除失败: ${error.message || error}`);
+    }
+  };
+
+  const handleExportConfig = async (preset) => {
+    try {
+      const config = await exportSharePresetConfig(preset.id);
+      const blob = new Blob([JSON.stringify(config, null, 2)], {
+        type: "application/json",
+      });
+      const url = URL.createObjectURL(blob);
+      const link = document.createElement("a");
+      link.href = url;
+      link.download = `share-submission-${preset.id}.json`;
+      link.click();
+      URL.revokeObjectURL(url);
+    } catch (error) {
+      alert(`导出配置失败: ${error.message || error}`);
     }
   };
 
@@ -329,6 +347,15 @@ export default function SharePresetPanel({
               </div>
 
               <div className="flex items-center gap-2">
+                {preset.has_export_config && (
+                  <button
+                    onClick={() => handleExportConfig(preset)}
+                    className="px-3 py-2 rounded-lg border border-gray-700 bg-gray-800 hover:bg-gray-700 text-sm text-white flex items-center gap-2"
+                  >
+                    <Download size={14} />
+                    导出配置
+                  </button>
+                )}
                 {latestLinks[preset.id] && (
                   <button
                     onClick={async () => {

@@ -310,6 +310,13 @@ export async function batchDeleteSharePresets(ids: string[]): Promise<any> {
   return webRequest("POST", "/api/share/presets/batch-delete", { ids });
 }
 
+export async function exportSharePresetConfig(id: string): Promise<any> {
+  if (isTauriRuntime()) {
+    throw new Error("导出代抢配置仅支持 headless Web 模式");
+  }
+  return webRequest("GET", `/api/share/presets/${encodeURIComponent(id)}/export-config`);
+}
+
 export async function loginWithAdminToken(token: string): Promise<string | null> {
   const normalized = token.trim();
   if (typeof localStorage !== "undefined") {

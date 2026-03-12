@@ -5,7 +5,7 @@ use crate::headless::auth as headless_auth;
 use crate::headless::ws::WsEventSink;
 use crate::headless::HeadlessState;
 use crate::share::{
-    build_ticket_info_from_submission, current_unix_secs, generate_share_token,
+    build_share_submission_export_config, build_ticket_info_from_submission, current_unix_secs, generate_share_token,
     hash_share_token, normalize_share_preset_status, share_submit_lock, share_token_matches_hash,
     validate_share_preset_batch_delete, LockedTaskConfig, ShareDisplaySnapshot,
     SharePresetRecord, SharePresetStatus, ShareSubmissionInput, ShareSubmissionSummary,
@@ -563,6 +563,7 @@ pub struct SharePresetSummaryResponse {
     pub title: Option<String>,
     pub max_success_submissions: u32,
     pub success_submission_count: u32,
+    pub has_export_config: bool,
     pub locked_task: LockedTaskConfig,
     pub display_snapshot: ShareDisplaySnapshot,
     pub last_submission: Option<ShareSubmissionSummary>,
@@ -579,6 +580,7 @@ fn summarize_share_preset(preset: &SharePresetRecord) -> SharePresetSummaryRespo
         title: preset.title.clone(),
         max_success_submissions: preset.max_success_submissions,
         success_submission_count: preset.success_submission_count,
+        has_export_config: preset.last_submission_export.is_some(),
         locked_task: preset.locked_task.clone(),
         display_snapshot: preset.display_snapshot.clone(),
         last_submission: preset.last_submission.clone(),
@@ -619,6 +621,7 @@ pub async fn create_share_preset(Json(req): Json<CreateSharePresetRequest>) -> R
         locked_task: req.locked_task,
         display_snapshot: req.display_snapshot,
         last_submission: None,
+        last_submission_export: None,
     };
 
     let preset_id = preset.id.clone();
@@ -704,6 +707,20 @@ pub async fn batch_delete_share_presets(
         )
             .into_response(),
         Err(e) => error_response(StatusCode::BAD_REQUEST, e.to_string()).into_response(),
+    }
+}
+
+pub async fn export_share_preset_config(Path(id): Path<String>) -> Response {
+    match storage::with_share_presets_mut(|presets| {
+        normalize_share_presets(presets);
+        Ok(presets
+            .iter()
+            .find(|preset| preset.id == id)
+            .and_then(|preset| preset.last_submission_export.clone()))
+    }) {
+        Ok(Some(config)) => (StatusCode::OK, Json(config)).into_response(),
+        Ok(None) => error_response(StatusCode::NOT_FOUND, "未找到可导出的代抢配置").into_response(),
+        Err(e) => error_response(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
     }
 }
 
@@ -845,6 +862,7 @@ pub async fn submit_share_preset(
         Ok(info) => info,
         Err(e) => return error_response(StatusCode::BAD_REQUEST, e.to_string()).into_response(),
     };
+    let export_config = build_share_submission_export_config(info.clone(), &preset.locked_task);
 
     let spawned = spawn_buy_task(
         &state,
@@ -885,6 +903,7 @@ pub async fn submit_share_preset(
         task_status: spawned.task_status.clone(),
         buyer_count: preset_mut.locked_task.count,
     });
+    preset_mut.last_submission_export = Some(export_config);
 
     if let Err(e) = storage::save_share_presets(&presets) {
         return error_response(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response();
