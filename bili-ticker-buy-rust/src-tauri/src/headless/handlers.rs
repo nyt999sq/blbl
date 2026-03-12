@@ -7,8 +7,8 @@ use crate::headless::HeadlessState;
 use crate::share::{
     build_ticket_info_from_submission, current_unix_secs, generate_share_token,
     hash_share_token, normalize_share_preset_status, share_submit_lock, share_token_matches_hash,
-    LockedTaskConfig, ShareDisplaySnapshot, SharePresetRecord, SharePresetStatus,
-    ShareSubmissionInput, ShareSubmissionSummary,
+    validate_share_preset_batch_delete, LockedTaskConfig, ShareDisplaySnapshot,
+    SharePresetRecord, SharePresetStatus, ShareSubmissionInput, ShareSubmissionSummary,
 };
 use crate::storage::{self, Account, ProjectConfig};
 use axum::extract::{Path, Query, State};
@@ -542,6 +542,16 @@ pub struct CreateSharePresetResponse {
     pub status: SharePresetStatus,
 }
 
+#[derive(Debug, Deserialize)]
+pub struct BatchDeleteSharePresetsRequest {
+    pub ids: Vec<String>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct BatchDeleteSharePresetsResponse {
+    pub deleted_count: usize,
+}
+
 #[derive(Debug, Serialize)]
 pub struct SharePresetSummaryResponse {
     pub id: String,
@@ -671,6 +681,29 @@ pub async fn close_share_preset(Path(id): Path<String>) -> Response {
             error_response(StatusCode::NOT_FOUND, e.to_string()).into_response()
         }
         Err(e) => error_response(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
+    }
+}
+
+pub async fn batch_delete_share_presets(
+    Json(req): Json<BatchDeleteSharePresetsRequest>,
+) -> Response {
+    let _share_guard = share_submit_lock().lock().await;
+    let now = current_unix_secs();
+
+    match storage::with_share_presets_mut(|presets| {
+        normalize_share_presets(presets);
+        let deletable_ids = validate_share_preset_batch_delete(presets, &req.ids, now)?;
+        let delete_set = deletable_ids.into_iter().collect::<std::collections::HashSet<_>>();
+        let before = presets.len();
+        presets.retain(|preset| !delete_set.contains(&preset.id));
+        Ok(before.saturating_sub(presets.len()))
+    }) {
+        Ok(deleted_count) => (
+            StatusCode::OK,
+            Json(BatchDeleteSharePresetsResponse { deleted_count }),
+        )
+            .into_response(),
+        Err(e) => error_response(StatusCode::BAD_REQUEST, e.to_string()).into_response(),
     }
 }
 

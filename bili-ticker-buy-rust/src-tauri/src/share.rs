@@ -162,6 +162,42 @@ pub fn normalize_share_preset_status(preset: &mut SharePresetRecord, now: i64) -
     false
 }
 
+pub fn share_preset_can_be_deleted(preset: &SharePresetRecord, now: i64) -> bool {
+    matches!(
+        effective_share_status(preset, now),
+        SharePresetStatus::Completed | SharePresetStatus::Expired | SharePresetStatus::Closed
+    )
+}
+
+pub fn validate_share_preset_batch_delete(
+    presets: &[SharePresetRecord],
+    ids: &[String],
+    now: i64,
+) -> Result<Vec<String>> {
+    if ids.is_empty() {
+        return Err(anyhow!("至少选择一条分享链接"));
+    }
+
+    let invalid_ids = ids
+        .iter()
+        .filter_map(|id| {
+            presets
+                .iter()
+                .find(|preset| preset.id == *id)
+                .and_then(|preset| (!share_preset_can_be_deleted(preset, now)).then(|| id.clone()))
+        })
+        .collect::<Vec<_>>();
+
+    if !invalid_ids.is_empty() {
+        return Err(anyhow!(
+            "以下分享链接仍处于可用状态，不能直接删除: {}",
+            invalid_ids.join(", ")
+        ));
+    }
+
+    Ok(ids.to_vec())
+}
+
 fn first_non_empty_string(candidates: &[Option<String>]) -> Option<String> {
     candidates
         .iter()
@@ -354,5 +390,126 @@ mod tests {
         assert_eq!(ticket_info.count, 2);
         assert_eq!(ticket_info.pay_money, Some(6800));
         assert_eq!(ticket_info.contact_tel.as_deref(), Some("13800000009"));
+    }
+
+    #[test]
+    fn batch_delete_rejects_active_presets() {
+        let preset = SharePresetRecord {
+            id: "preset-active".to_string(),
+            token_hash: "hash".to_string(),
+            status: SharePresetStatus::Active,
+            created_at: 100,
+            expires_at: Some(200),
+            creator_uid: None,
+            creator_name: None,
+            title: None,
+            max_success_submissions: 1,
+            success_submission_count: 0,
+            locked_task: LockedTaskConfig {
+                project_id: "1".to_string(),
+                project_name: "project".to_string(),
+                screen_id: "2".to_string(),
+                screen_name: "screen".to_string(),
+                sku_id: "3".to_string(),
+                sku_name: "sku".to_string(),
+                count: 1,
+                pay_money: 100,
+                is_hot_project: false,
+                time_start: None,
+                interval: 1000,
+                mode: 0,
+                total_attempts: 1,
+                proxy: None,
+                ntp_server: None,
+            },
+            display_snapshot: ShareDisplaySnapshot {
+                venue_name: None,
+                sale_start_text: None,
+                ticket_desc: "demo".to_string(),
+                price_text: "1.00".to_string(),
+                locked_fields_text: vec![],
+                tips: vec![],
+            },
+            last_submission: None,
+        };
+
+        let error = validate_share_preset_batch_delete(
+            &[preset],
+            &["preset-active".to_string()],
+            150,
+        )
+        .unwrap_err();
+
+        assert!(error
+            .to_string()
+            .contains("不能直接删除"));
+    }
+
+    #[test]
+    fn batch_delete_accepts_completed_and_closed_presets() {
+        let base = LockedTaskConfig {
+            project_id: "1".to_string(),
+            project_name: "project".to_string(),
+            screen_id: "2".to_string(),
+            screen_name: "screen".to_string(),
+            sku_id: "3".to_string(),
+            sku_name: "sku".to_string(),
+            count: 1,
+            pay_money: 100,
+            is_hot_project: false,
+            time_start: None,
+            interval: 1000,
+            mode: 0,
+            total_attempts: 1,
+            proxy: None,
+            ntp_server: None,
+        };
+        let display = ShareDisplaySnapshot {
+            venue_name: None,
+            sale_start_text: None,
+            ticket_desc: "demo".to_string(),
+            price_text: "1.00".to_string(),
+            locked_fields_text: vec![],
+            tips: vec![],
+        };
+        let completed = SharePresetRecord {
+            id: "completed".to_string(),
+            token_hash: "hash".to_string(),
+            status: SharePresetStatus::Completed,
+            created_at: 100,
+            expires_at: Some(200),
+            creator_uid: None,
+            creator_name: None,
+            title: None,
+            max_success_submissions: 1,
+            success_submission_count: 1,
+            locked_task: base.clone(),
+            display_snapshot: display.clone(),
+            last_submission: None,
+        };
+        let closed = SharePresetRecord {
+            id: "closed".to_string(),
+            token_hash: "hash".to_string(),
+            status: SharePresetStatus::Closed,
+            created_at: 100,
+            expires_at: Some(200),
+            creator_uid: None,
+            creator_name: None,
+            title: None,
+            max_success_submissions: 1,
+            success_submission_count: 0,
+            locked_task: base,
+            display_snapshot: display,
+            last_submission: None,
+        };
+
+        let result = validate_share_preset_batch_delete(
+            &[completed, closed],
+            &["completed".to_string(), "closed".to_string()],
+            150,
+        )
+        .unwrap();
+
+        assert_eq!(result, vec!["completed".to_string(), "closed".to_string()]);
     }
 }

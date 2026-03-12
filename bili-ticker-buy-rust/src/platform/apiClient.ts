@@ -9,6 +9,7 @@ type ApiClientError = Error & {
 };
 
 let sessionPromise: Promise<string | null> | null = null;
+const ADMIN_AUTH_INVALID_EVENT = "bili-admin-auth-invalid";
 
 function loadStoredSession(): string | null {
   if (typeof localStorage === "undefined") return null;
@@ -28,6 +29,11 @@ function clearStoredSession(): void {
 function clearStoredServerToken(): void {
   if (typeof localStorage === "undefined") return;
   localStorage.removeItem("bili_headless_server_token");
+}
+
+function dispatchAdminAuthInvalid(): void {
+  if (typeof window === "undefined") return;
+  window.dispatchEvent(new CustomEvent(ADMIN_AUTH_INVALID_EVENT));
 }
 
 async function requestWebSession(token: string): Promise<string | null> {
@@ -68,13 +74,6 @@ function loadServerToken(): string {
     return preferred;
   }
 
-  if (typeof window !== "undefined") {
-    const entered = window.prompt("请输入服务器 Token（若未设置可留空）", "");
-    if (entered !== null) {
-      localStorage.setItem("bili_headless_server_token", entered);
-      return entered;
-    }
-  }
   return "";
 }
 
@@ -99,6 +98,9 @@ export async function ensureWebSession(): Promise<string | null> {
         clearStoredServerToken();
         return requestWebSession(loadServerToken());
       }
+      clearStoredSession();
+      clearStoredServerToken();
+      dispatchAdminAuthInvalid();
       throw error;
     }
   })().finally(() => {
@@ -299,4 +301,43 @@ export async function submitSharePreset(
   payload: Record<string, any>
 ): Promise<any> {
   return publicRequest("POST", `/api/share/${encodeURIComponent(token)}/submit`, payload);
+}
+
+export async function batchDeleteSharePresets(ids: string[]): Promise<any> {
+  if (isTauriRuntime()) {
+    throw new Error("批量删除分享链接仅支持 headless Web 模式");
+  }
+  return webRequest("POST", "/api/share/presets/batch-delete", { ids });
+}
+
+export async function loginWithAdminToken(token: string): Promise<string | null> {
+  const normalized = token.trim();
+  if (typeof localStorage !== "undefined") {
+    localStorage.setItem("bili_headless_server_token", normalized);
+  }
+  try {
+    const session = await requestWebSession(normalized);
+    return session;
+  } catch (error) {
+    clearStoredSession();
+    clearStoredServerToken();
+    throw error;
+  }
+}
+
+export function clearAdminAuth(): void {
+  clearStoredSession();
+  clearStoredServerToken();
+}
+
+export function getStoredAdminToken(): string {
+  return loadServerToken();
+}
+
+export function onAdminAuthInvalid(handler: () => void): () => void {
+  if (typeof window === "undefined") {
+    return () => {};
+  }
+  window.addEventListener(ADMIN_AUTH_INVALID_EVENT, handler);
+  return () => window.removeEventListener(ADMIN_AUTH_INVALID_EVENT, handler);
 }

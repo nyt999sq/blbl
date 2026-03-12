@@ -1,9 +1,9 @@
 import { useState, useEffect, useRef } from "react";
-import { invoke } from "./platform/apiClient";
+import { clearAdminAuth, invoke } from "./platform/apiClient";
 import { listen } from "./platform/eventClient";
 import { isPermissionGranted, requestPermission, sendNotification } from "./platform/notificationClient";
 import { isTauriRuntime } from "./platform/runtime";
-import { Play, Settings, User, FileJson, Terminal, Clock, Bell, Network, Volume2, LogOut, RefreshCw, Search, CheckSquare, Square, Trash2, Plus, History, X, List, Save, Copy, Crown, ExternalLink, Upload, Download, Github, LayoutDashboard, Rocket } from "lucide-react";
+import { Play, Settings, User, FileJson, Terminal, Clock, Bell, Network, Volume2, LogOut, RefreshCw, Search, CheckSquare, Square, Trash2, Plus, History, X, List, Save, Copy, Crown, ExternalLink, Upload, Download, LayoutDashboard, Rocket } from "lucide-react";
 import { QRCodeCanvas } from "qrcode.react";
 import logo from "./assets/logo.png";
 import SharePresetPanel from "./share/SharePresetPanel";
@@ -16,6 +16,10 @@ import {
     formatDateToLocalDateTime,
     normalizeDateTimeLocalValue,
 } from "./share/sharePresetHelpers";
+import {
+    buildConfigSnapshot,
+    normalizeImportedConfig,
+} from "./config/configSnapshot.js";
 import { copyText } from "./utils/clipboard";
 import "./App.css";
 
@@ -35,7 +39,7 @@ const SALES_FLAG_MAP = {
     106: "已取消",
 };
 
-function App() {
+function App({ onAdminLogout }) {
     const [activeTab, setActiveTab] = useState("run");
     const [tasks, setTasks] = useState([]);
     const [viewMode, setViewMode] = useState("list");
@@ -105,6 +109,7 @@ function App() {
     const logsEndRef = useRef(null);
     const fileInputRef = useRef(null);
     const cookieFileInputRef = useRef(null);
+    const pendingBuyerImportIdsRef = useRef([]);
     const isWebRuntime = !isTauriRuntime();
 
     const updateTimeOffset = (value) => {
@@ -168,6 +173,16 @@ function App() {
                 "请确保已在 B 站会员购中维护好实名购票人和收货地址"
             ]
         };
+    };
+
+    const restoreImportedBuyerSelection = (buyerList) => {
+        const pendingIds = pendingBuyerImportIdsRef.current;
+        if (!Array.isArray(pendingIds) || pendingIds.length === 0) return;
+        const restored = pendingIds
+            .map((buyerId) => buyerList.find((buyer) => String(buyer.id) === String(buyerId)))
+            .filter(Boolean);
+        setSelectedBuyers(restored);
+        pendingBuyerImportIdsRef.current = [];
     };
 
     const formatLocalTimeWithMs = (date) => {
@@ -594,25 +609,39 @@ function App() {
     }
 
     function handleExportConfig() {
-        const config = {
+        if (!projectInfo || !selectedScreen || !selectedSku) {
+            alert("请先选择项目、场次和票档后再导出配置");
+            return;
+        }
+
+        const config = buildConfigSnapshot({
             projectId,
-            screenId: selectedScreen?.id,
-            skuId: selectedSku?.id,
-            buyerIds: selectedBuyers.map(b => b.id),
+            projectInfo,
+            selectedScreen,
+            selectedSku,
+            selectedBuyers,
+            selectedAddress,
             buyerAddresses,
+            buyerContactNames,
+            buyerContactTels,
+            contactName,
+            contactTel,
             timeStart,
             interval: requestInterval,
             mode,
             totalAttempts,
             proxy,
-            timeOffset
-        };
+            timeOffset,
+            ntpServer,
+            ticketCount,
+        });
         const blob = new Blob([JSON.stringify(config, null, 2)], { type: "application/json" });
         const url = URL.createObjectURL(blob);
         const a = document.createElement("a");
         a.href = url;
         a.download = `bili-config-${projectId || "draft"}.json`;
         a.click();
+        URL.revokeObjectURL(url);
     }
 
     function handleImportConfig(e) {
@@ -621,21 +650,38 @@ function App() {
         const reader = new FileReader();
         reader.onload = async (ev) => {
             try {
-                const config = JSON.parse(ev.target.result);
-                if (config.projectId) {
-                    setProjectId(config.projectId);
+                const importedConfig = normalizeImportedConfig(JSON.parse(ev.target.result));
+                setProjectId(importedConfig.projectId);
+                setTimeStart(importedConfig.timeStart);
+                setRequestInterval(importedConfig.interval);
+                setMode(importedConfig.mode);
+                setTotalAttempts(importedConfig.totalAttempts);
+                setProxy(importedConfig.proxy);
+                updateTimeOffset(importedConfig.timeOffset);
+                setNtpServer(importedConfig.ntpServer || "https://api.bilibili.com/x/report/click/now");
+                setTicketCount(importedConfig.ticketCount);
+                setBuyerAddresses(importedConfig.buyerAddresses);
+                setBuyerContactNames(importedConfig.buyerContactNames);
+                setBuyerContactTels(importedConfig.buyerContactTels);
+                setSelectedAddress(importedConfig.selectedAddress);
+                setContactName(importedConfig.contactName);
+                setContactTel(importedConfig.contactTel);
+                pendingBuyerImportIdsRef.current = importedConfig.selectedBuyerIds;
+
+                if (importedConfig.projectId) {
+                    setProjectId(importedConfig.projectId);
 
                     // Fetch project info to restore screen/sku
-                    const res = await invoke("fetch_project", { id: config.projectId });
+                    const res = await invoke("fetch_project", { id: importedConfig.projectId });
                     if (res.code === 0 && res.data) {
                         setProjectInfo(res.data);
 
-                        if (config.screenId) {
-                            const screen = (res.data.screen_list || res.data.screens || []).find(s => String(s.id) === String(config.screenId));
+                        if (importedConfig.screenId) {
+                            const screen = (res.data.screen_list || res.data.screens || []).find(s => String(s.id) === String(importedConfig.screenId));
                             if (screen) {
                                 setSelectedScreen(screen);
-                                if (config.skuId) {
-                                    const sku = (screen.ticket_list || []).find(s => String(s.id) === String(config.skuId));
+                                if (importedConfig.skuId) {
+                                    const sku = (screen.ticket_list || []).find(s => String(s.id) === String(importedConfig.skuId));
                                     if (sku) setSelectedSku(sku);
                                 }
                             }
@@ -643,20 +689,15 @@ function App() {
                     }
                 }
 
-                if (config.timeStart) setTimeStart(config.timeStart);
-                if (config.interval) setRequestInterval(config.interval);
-                if (config.mode !== undefined) setMode(config.mode);
-                if (config.totalAttempts) setTotalAttempts(config.totalAttempts);
-                if (config.proxy) setProxy(config.proxy);
-                if (typeof config.timeOffset !== "undefined") updateTimeOffset(config.timeOffset);
-                if (config.buyerAddresses) {
-                    const normalizedMap = Object.fromEntries(
-                        Object.entries(config.buyerAddresses).map(([key, addr]) => [key, normalizeAddress(addr)])
-                    );
-                    setBuyerAddresses(normalizedMap);
+                if (cookies && importedConfig.projectId) {
+                    await fetchBuyers(cookies, importedConfig.projectId);
+                    await fetchAddresses(cookies, importedConfig.selectedAddress);
+                    alert("配置导入成功！");
+                } else if (importedConfig.selectedBuyerIds.length > 0) {
+                    alert("配置导入成功，项目和策略已恢复。登录账号后将继续恢复购票人。");
+                } else {
+                    alert("配置导入成功！");
                 }
-
-                alert("配置导入成功！(请注意：购票人需重新确认)");
             } catch (err) {
                 alert("导入失败: " + err);
             }
@@ -695,6 +736,7 @@ function App() {
 
             if (code === 0 && response.data && Array.isArray(response.data.list)) {
                 setBuyers(response.data.list);
+                restoreImportedBuyerSelection(response.data.list);
             } else {
                 setLogs(prev => [...prev, "获取购票人失败: " + (response.msg || response.message || JSON.stringify(response))]);
             }
@@ -703,7 +745,7 @@ function App() {
         }
     }
 
-    async function fetchAddresses(cookiesOverride) {
+    async function fetchAddresses(cookiesOverride, preferredAddress = null) {
         setAddresses([]);
         let currentCookies = cookiesOverride;
         if (!currentCookies || (currentCookies.type && currentCookies.preventDefault)) {
@@ -720,12 +762,19 @@ function App() {
                 setAddresses(normalizedList);
                 // Debug: 输出获取到的地址数量，方便排查只有一条地址的问题
                 console.debug("fetchAddresses: got", normalizedList.length, "addresses", normalizedList);
-                const def = normalizedList.find(a => a.is_default);
-                if (def) {
-                    setSelectedAddress(def);
-                    if (def.name) setContactName(def.name);
-                    const defPhone = getAddressPhone(def);
-                    if (defPhone) setContactTel(defPhone);
+                const preferredMatch = preferredAddress
+                    ? normalizedList.find(a => String(a.id) === String(preferredAddress.id))
+                    : null;
+                if (preferredMatch) {
+                    setSelectedAddress(preferredMatch);
+                } else if (!selectedAddress) {
+                    const def = normalizedList.find(a => a.is_default);
+                    if (def) {
+                        setSelectedAddress(def);
+                        if (!contactName && def.name) setContactName(def.name);
+                        const defPhone = getAddressPhone(def);
+                        if (!contactTel && defPhone) setContactTel(defPhone);
+                    }
                 }
             }
         } catch (e) {
@@ -1305,7 +1354,7 @@ function App() {
     }
 
     async function handleTestPush(type) {
-        const title = "B站抢票助手测试";
+        const title = "SmartGrab 测试";
         const content = "这是一条测试消息，如果您收到此消息，说明推送配置正确。";
         let url = "";
         let method = "GET";
@@ -1374,7 +1423,7 @@ function App() {
             <div className="w-64 bg-gray-950 p-4 flex flex-col border-r border-gray-800">
                 <div className="flex items-center gap-2 mb-8 px-2">
                     <img src={logo} alt="Logo" className="w-8 h-8 rounded-lg" />
-                    <h1 className="text-xl font-bold">B站抢票助手</h1>
+                    <h1 className="text-xl font-bold">SmartGrab</h1>
                 </div>
 
                 {userInfo ? (
@@ -1440,6 +1489,19 @@ function App() {
                         {activeTab === "about" && "关于"}
                     </h2>
                     <div className="flex items-center gap-4">
+                        {isWebRuntime && (
+                            <button
+                                onClick={() => {
+                                    clearAdminAuth();
+                                    onAdminLogout?.();
+                                }}
+                                className="flex items-center gap-2 text-sm text-gray-300 bg-gray-800 px-3 py-2 rounded-lg border border-gray-700 hover:bg-gray-700"
+                                title="退出后台并清除已保存 token"
+                            >
+                                <LogOut size={14} />
+                                退出后台
+                            </button>
+                        )}
                         <div className="flex items-center gap-2 text-sm text-gray-400 bg-gray-800 px-3 py-1 rounded-full" title={`本地时间`}>
                             <Clock size={14} />
                             <span className="font-mono w-32">{formatLocalTimeWithMs(now)}</span>
@@ -2640,7 +2702,7 @@ function App() {
                             <div className="max-w-3xl mx-auto">
                                 <div className="bg-gray-800 rounded-xl p-8 shadow-lg border border-gray-700 text-center">
                                     <img src={logo} alt="Logo" className="w-20 h-20 rounded-2xl mx-auto mb-6 shadow-lg shadow-blue-500/20" />
-                                    <h2 className="text-3xl font-bold mb-2">B站抢票助手</h2>
+                                    <h2 className="text-3xl font-bold mb-2">SmartGrab</h2>
                                     <p className="text-gray-400 mb-8">Rust 重构版 V2.4.0</p>
 
                                     <div className="text-left bg-gray-900/50 p-6 rounded-xl border border-gray-700 mb-8 space-y-4 text-sm text-gray-300 leading-relaxed">
@@ -2656,18 +2718,6 @@ function App() {
                                         <p>
                                             若您 fork 或使用本项目，请务必遵守相关法律法规与目标平台规则。
                                         </p>
-                                    </div>
-
-                                    <div className="flex justify-center gap-4">
-                                        <a
-                                            href="https://github.com/NekoMirra/biliTickerBuy"
-                                            target="_blank"
-                                            rel="noreferrer"
-                                            className="flex items-center gap-2 bg-gray-700 hover:bg-gray-600 text-white px-6 py-3 rounded-xl font-bold transition-all hover:scale-105"
-                                        >
-                                            <Github size={20} />
-                                            GitHub 项目主页
-                                        </a>
                                     </div>
 
                                     <div className="mt-8 text-xs text-gray-500">

@@ -49,6 +49,10 @@ pub fn build_router(state: HeadlessState, static_dir: PathBuf) -> Router {
             get(handlers::list_share_presets).post(handlers::create_share_preset),
         )
         .route(
+            "/api/share/presets/batch-delete",
+            post(handlers::batch_delete_share_presets),
+        )
+        .route(
             "/api/share/presets/:id/close",
             post(handlers::close_share_preset),
         )
