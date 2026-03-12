@@ -1,0 +1,94 @@
+[
+  {
+    "id": "15554749-067e-4204-b356-348f418509a4",
+    "token_hash": "dce4cb0e7fdae27bceb5e1ac3b3bc2f9",
+    "status": "closed",
+    "created_at": 1773283058,
+    "expires_at": 1773369458,
+    "creator_uid": null,
+    "creator_name": null,
+    "title": null,
+    "max_success_submissions": 1,
+    "success_submission_count": 0,
+    "locked_task": {
+      "project_id": "113573",
+      "project_name": "济南·幻樱动漫游戏嘉年华-22",
+      "screen_id": "325363",
+      "screen_name": "5月1日",
+      "sku_id": "834811",
+      "sku_name": "预售票",
+      "count": 1,
+      "pay_money": 7200,
+      "is_hot_project": false,
+      "time_start": "2026-02-22 18:00:00",
+      "interval": 1000,
+      "mode": 0,
+      "total_attempts": 10,
+      "proxy": null,
+      "ntp_server": "https://api.bilibili.com/x/report/click/now"
+    },
+    "display_snapshot": {
+      "venue_name": null,
+      "sale_start_text": "2026-02-22 18:00:00",
+      "ticket_desc": "5月1日 - 预售票",
+      "price_text": "￥72.00",
+      "locked_fields_text": [
+        "项目、场次、票档已由发起人锁定",
+        "抢票时间与重试策略已由系统预设",
+        "你只能填写自己的实名购票信息与登录授权"
+      ],
+      "tips": [
+        "请使用你自己的 B 站账号扫码登录",
+        "提交成功后链接将自动失效",
+        "请确保已在 B 站会员购中维护好实名购票人和收货地址"
+      ]
+    },
+    "last_submission": null
+  },
+  {
+    "id": "651ac7aa-c8bd-4fb7-8647-8f52f23be57f",
+    "token_hash": "d07c832a052772d818f731acabaaab89",
+    "status": "closed",
+    "created_at": 1773282954,
+    "expires_at": 1773369354,
+    "creator_uid": null,
+    "creator_name": null,
+    "title": null,
+    "max_success_submissions": 1,
+    "success_submission_count": 0,
+    "locked_task": {
+      "project_id": "113573",
+      "project_name": "济南·幻樱动漫游戏嘉年华-22",
+      "screen_id": "325363",
+      "screen_name": "5月1日",
+      "sku_id": "834811",
+      "sku_name": "预售票",
+      "count": 1,
+      "pay_money": 7200,
+      "is_hot_project": false,
+      "time_start": "2026-02-22 18:00:00",
+      "interval": 1000,
+      "mode": 0,
+      "total_attempts": 10,
+      "proxy": null,
+      "ntp_server": "https://api.bilibili.com/x/report/click/now"
+    },
+    "display_snapshot": {
+      "venue_name": null,
+      "sale_start_text": "2026-02-22 18:00:00",
+      "ticket_desc": "5月1日 - 预售票",
+      "price_text": "￥72.00",
+      "locked_fields_text": [
+        "项目、场次、票档已由发起人锁定",
+        "抢票时间与重试策略已由系统预设",
+        "你只能填写自己的实名购票信息与登录授权"
+      ],
+      "tips": [
+        "请使用你自己的 B 站账号扫码登录",
+        "提交成功后链接将自动失效",
+        "请确保已在 B 站会员购中维护好实名购票人和收货地址"
+      ]
+    },
+    "last_submission": null
+  }
+]

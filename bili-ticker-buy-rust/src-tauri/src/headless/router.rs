@@ -14,6 +14,13 @@ pub fn build_router(state: HeadlessState, static_dir: PathBuf) -> Router {
         .route("/api/auth/token-login", post(handlers::token_login))
         .route("/api/login/qrcode", get(handlers::get_login_qrcode))
         .route("/api/login/poll", get(handlers::poll_login_status))
+        .route("/api/share/:token", get(handlers::get_share_preset_public))
+        .route("/api/share/:token/buyers", post(handlers::fetch_share_buyers))
+        .route(
+            "/api/share/:token/addresses",
+            post(handlers::fetch_share_addresses),
+        )
+        .route("/api/share/:token/submit", post(handlers::submit_share_preset))
         .route("/api/ws", get(ws::ws_handler));
 
     let protected_routes = Router::new()
@@ -36,6 +43,14 @@ pub fn build_router(state: HeadlessState, static_dir: PathBuf) -> Router {
         .route(
             "/api/project-history",
             delete(handlers::delete_project_history),
+        )
+        .route(
+            "/api/share/presets",
+            get(handlers::list_share_presets).post(handlers::create_share_preset),
+        )
+        .route(
+            "/api/share/presets/:id/close",
+            post(handlers::close_share_preset),
         )
         .layer(middleware::from_fn_with_state(
             state.clone(),

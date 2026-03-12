@@ -1,6 +1,12 @@
 import { getApiBase, isTauriRuntime } from "./runtime";
+import { getPreferredServerToken } from "./serverToken";
 
 type InvokeArgs = Record<string, any> | undefined;
+
+type ApiClientError = Error & {
+  data?: any;
+  statusCode?: number;
+};
 
 let sessionPromise: Promise<string | null> | null = null;
 
@@ -19,15 +25,47 @@ function clearStoredSession(): void {
   localStorage.removeItem("bili_headless_session");
 }
 
-function loadServerToken(): string {
-  if (typeof localStorage === "undefined") return "";
-  const existing = localStorage.getItem("bili_headless_server_token");
-  if (existing) return existing;
+function clearStoredServerToken(): void {
+  if (typeof localStorage === "undefined") return;
+  localStorage.removeItem("bili_headless_server_token");
+}
 
+async function requestWebSession(token: string): Promise<string | null> {
+  const apiBase = getApiBase();
+  const headers: Record<string, string> = {};
+  if (token) {
+    headers.Authorization = `Bearer ${token}`;
+  }
+  const response = await fetch(`${apiBase}/api/auth/token-login`, {
+    method: "POST",
+    headers,
+  });
+  if (!response.ok) {
+    const error = new Error(`token-login failed: ${response.status}`) as ApiClientError;
+    error.statusCode = response.status;
+    throw error;
+  }
+  const data = await response.json();
+  if (data?.session) {
+    saveStoredSession(data.session);
+    return data.session as string;
+  }
+  return null;
+}
+
+function loadServerToken(): string {
   const fromEnv = import.meta.env.VITE_HEADLESS_SERVER_TOKEN;
-  if (typeof fromEnv === "string" && fromEnv) {
-    localStorage.setItem("bili_headless_server_token", fromEnv);
-    return fromEnv;
+  if (typeof localStorage === "undefined") {
+    return getPreferredServerToken("", fromEnv);
+  }
+
+  const existing = localStorage.getItem("bili_headless_server_token");
+  const preferred = getPreferredServerToken(existing, fromEnv);
+  if (preferred) {
+    if (preferred !== existing) {
+      localStorage.setItem("bili_headless_server_token", preferred);
+    }
+    return preferred;
   }
 
   if (typeof window !== "undefined") {
@@ -46,25 +84,23 @@ export async function ensureWebSession(): Promise<string | null> {
 
   if (sessionPromise) return sessionPromise;
   sessionPromise = (async () => {
-    const apiBase = getApiBase();
     const token = loadServerToken();
-    const headers: Record<string, string> = {};
-    if (token) {
-      headers.Authorization = `Bearer ${token}`;
+    try {
+      return await requestWebSession(token);
+    } catch (error) {
+      const envToken = getPreferredServerToken("", import.meta.env.VITE_HEADLESS_SERVER_TOKEN);
+      const shouldRetryWithFreshToken =
+        (error as ApiClientError)?.statusCode === 401 &&
+        typeof localStorage !== "undefined" &&
+        localStorage.getItem("bili_headless_server_token") !== envToken;
+
+      if (shouldRetryWithFreshToken) {
+        clearStoredSession();
+        clearStoredServerToken();
+        return requestWebSession(loadServerToken());
+      }
+      throw error;
     }
-    const response = await fetch(`${apiBase}/api/auth/token-login`, {
-      method: "POST",
-      headers,
-    });
-    if (!response.ok) {
-      throw new Error(`token-login failed: ${response.status}`);
-    }
-    const data = await response.json();
-    if (data?.session) {
-      saveStoredSession(data.session);
-      return data.session as string;
-    }
-    return null;
   })().finally(() => {
     sessionPromise = null;
   });
@@ -102,11 +138,15 @@ async function webRequest(
 
   if (!response.ok) {
     let message = `${response.status}`;
+    let data: any = null;
     try {
-      const data = await response.json();
+      data = await response.json();
       message = data?.error || message;
     } catch (_) {}
-    throw new Error(message);
+    const error = new Error(message) as ApiClientError;
+    error.data = data;
+    error.statusCode = response.status;
+    throw error;
   }
 
   const contentType = response.headers.get("content-type") || "";
@@ -114,6 +154,10 @@ async function webRequest(
     return null;
   }
   return response.json();
+}
+
+async function publicRequest(method: string, path: string, body?: unknown): Promise<any> {
+  return webRequest(method, path, body, false);
 }
 
 async function invokeWeb(command: string, args: InvokeArgs): Promise<any> {
@@ -211,4 +255,48 @@ export async function invoke(command: string, args?: InvokeArgs): Promise<any> {
     return tauri.invoke(command, args);
   }
   return invokeWeb(command, args);
+}
+
+export async function createSharePreset(payload: Record<string, any>): Promise<any> {
+  if (isTauriRuntime()) {
+    throw new Error("分享链接仅支持 headless Web 模式");
+  }
+  return webRequest("POST", "/api/share/presets", payload);
+}
+
+export async function listSharePresets(): Promise<any> {
+  if (isTauriRuntime()) {
+    return [];
+  }
+  return webRequest("GET", "/api/share/presets");
+}
+
+export async function closeSharePreset(id: string): Promise<any> {
+  if (isTauriRuntime()) {
+    throw new Error("分享链接仅支持 headless Web 模式");
+  }
+  return webRequest("POST", `/api/share/presets/${encodeURIComponent(id)}/close`);
+}
+
+export async function getPublicSharePreset(token: string): Promise<any> {
+  return publicRequest("GET", `/api/share/${encodeURIComponent(token)}`);
+}
+
+export async function fetchShareBuyers(token: string, cookies: string[]): Promise<any> {
+  return publicRequest("POST", `/api/share/${encodeURIComponent(token)}/buyers`, {
+    cookies,
+  });
+}
+
+export async function fetchShareAddresses(token: string, cookies: string[]): Promise<any> {
+  return publicRequest("POST", `/api/share/${encodeURIComponent(token)}/addresses`, {
+    cookies,
+  });
+}
+
+export async function submitSharePreset(
+  token: string,
+  payload: Record<string, any>
+): Promise<any> {
+  return publicRequest("POST", `/api/share/${encodeURIComponent(token)}/submit`, payload);
 }

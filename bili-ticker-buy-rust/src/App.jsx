@@ -2,9 +2,21 @@ import { useState, useEffect, useRef } from "react";
 import { invoke } from "./platform/apiClient";
 import { listen } from "./platform/eventClient";
 import { isPermissionGranted, requestPermission, sendNotification } from "./platform/notificationClient";
+import { isTauriRuntime } from "./platform/runtime";
 import { Play, Settings, User, FileJson, Terminal, Clock, Bell, Network, Volume2, LogOut, RefreshCw, Search, CheckSquare, Square, Trash2, Plus, History, X, List, Save, Copy, Crown, ExternalLink, Upload, Download, Github, LayoutDashboard, Rocket } from "lucide-react";
 import { QRCodeCanvas } from "qrcode.react";
 import logo from "./assets/logo.png";
+import SharePresetPanel from "./share/SharePresetPanel";
+import {
+    getAddressPhone,
+    getBuyerPhone,
+    normalizeAddress,
+} from "./share/sharePayload";
+import {
+    formatDateToLocalDateTime,
+    normalizeDateTimeLocalValue,
+} from "./share/sharePresetHelpers";
+import { copyText } from "./utils/clipboard";
 import "./App.css";
 
 const SALES_FLAG_MAP = {
@@ -21,71 +33,6 @@ const SALES_FLAG_MAP = {
     103: "未完成",
     105: "下架",
     106: "已取消",
-};
-
-const hasMaskChar = (value) => typeof value === "string" && value.includes("*");
-
-const pickCleanPhone = (...values) => {
-    for (const value of values) {
-        if (!value && value !== 0) continue;
-        const str = String(value).trim();
-        if (!str) continue;
-        if (!hasMaskChar(str)) {
-            return str;
-        }
-    }
-    return "";
-};
-
-const normalizeAddress = (addr) => {
-    if (!addr || typeof addr !== "object") return addr;
-    const cleanPhone = pickCleanPhone(
-        addr.phone,
-        addr.tel,
-        addr.mobile,
-        addr.phone_num,
-        addr.contact_tel,
-        addr.contact_phone
-    );
-    if (cleanPhone) {
-        return { ...addr, phone: cleanPhone };
-    }
-    return { ...addr };
-};
-
-const getAddressPhone = (addr) => {
-    if (!addr) return "";
-    return pickCleanPhone(
-        addr.phone,
-        addr.tel,
-        addr.mobile,
-        addr.phone_num,
-        addr.contact_tel,
-        addr.contact_phone
-    );
-};
-
-const getBuyerPhone = (buyer) => {
-    if (!buyer) return "";
-    return pickCleanPhone(
-        buyer.tel,
-        buyer.mobile,
-        buyer.phone,
-        buyer.contact_tel,
-        buyer.contact_phone
-    );
-};
-
-const sanitizeBuyer = (buyer, fallbackTel = "") => {
-    if (!buyer || typeof buyer !== "object") return buyer;
-    const cleanPhone = getBuyerPhone(buyer) || fallbackTel || "";
-    const sanitized = { ...buyer };
-    if (cleanPhone) {
-        sanitized.tel = cleanPhone;
-        sanitized.mobile = cleanPhone;
-        sanitized.phone = cleanPhone;
-    }
-    return sanitized;
 };
 
 function App() {
@@ -158,6 +105,7 @@ function App() {
     const logsEndRef = useRef(null);
     const fileInputRef = useRef(null);
     const cookieFileInputRef = useRef(null);
+    const isWebRuntime = !isTauriRuntime();
 
     const updateTimeOffset = (value) => {
         const numeric = Number(value);
@@ -172,6 +120,55 @@ function App() {
     };
 
     const syncedServerDate = getSyncedServerDate();
+
+    const formatSaleStartText = (value) => {
+        if (!value && value !== 0) return "";
+        if (typeof value === "number") {
+            return formatDateToLocalDateTime(new Date(value * 1000), true);
+        }
+        return String(value).trim();
+    };
+
+    const buildShareLockedTask = () => {
+        if (!projectInfo || !selectedScreen || !selectedSku) return null;
+        return {
+            project_id: String(projectId),
+            project_name: projectInfo.name || "",
+            screen_id: String(selectedScreen.id),
+            screen_name: selectedScreen.name || "",
+            sku_id: String(selectedSku.id),
+            sku_name: selectedSku.desc || "",
+            count: Number(ticketCount) || 1,
+            pay_money: selectedSku.price || 0,
+            is_hot_project: Boolean(selectedScreen.screen_type === 2 || selectedSku.is_hot_project),
+            time_start: timeStart || null,
+            interval: parseInt(requestInterval),
+            mode: parseInt(mode),
+            total_attempts: parseInt(totalAttempts),
+            proxy: proxy || null,
+            ntp_server: ntpServer || null
+        };
+    };
+
+    const buildShareDisplaySnapshot = () => {
+        if (!projectInfo || !selectedScreen || !selectedSku) return null;
+        return {
+            venue_name: projectInfo.venue_name || null,
+            sale_start_text: formatSaleStartText(selectedSku.sale_start || projectInfo.sale_start || projectInfo.sale_start_str),
+            ticket_desc: `${selectedScreen.name} - ${selectedSku.desc}`,
+            price_text: `￥${((selectedSku.price || 0) / 100).toFixed(2)}`,
+            locked_fields_text: [
+                "项目、场次、票档已由发起人锁定",
+                "抢票时间与重试策略已由系统预设",
+                "你只能填写自己的实名购票信息与登录授权"
+            ],
+            tips: [
+                "请使用你自己的 B 站账号扫码登录",
+                "提交成功后链接将自动失效",
+                "请确保已在 B 站会员购中维护好实名购票人和收货地址"
+            ]
+        };
+    };
 
     const formatLocalTimeWithMs = (date) => {
         const h = date.getHours().toString().padStart(2, '0');
@@ -510,12 +507,10 @@ function App() {
 
                 // Auto-set start time if available
                 if (response.data.sale_start) {
-                    // Convert timestamp to YYYY-MM-DD HH:MM:SS
                     const date = new Date(response.data.sale_start * 1000);
-                    const formatted = date.toLocaleString('zh-CN', { hour12: false }).replace(/\//g, '-');
-                    setTimeStart(formatted);
+                    setTimeStart(formatDateToLocalDateTime(date, true));
                 } else if (response.data.sale_start_str) {
-                    setTimeStart(response.data.sale_start_str);
+                    setTimeStart(normalizeDateTimeLocalValue(response.data.sale_start_str).replace('T', ' '));
                 }
 
                 // Save to project history immediately
@@ -565,10 +560,10 @@ function App() {
             // If it's a timestamp (number), convert it.
             if (typeof timeStr === 'number') {
                 const date = new Date(timeStr * 1000);
-                timeStr = date.toLocaleString('zh-CN', { hour12: false }).replace(/\//g, '-');
+                timeStr = formatDateToLocalDateTime(date, true);
             }
             if (timeStr) {
-                setTimeStart(timeStr);
+                setTimeStart(normalizeDateTimeLocalValue(timeStr).replace('T', ' '));
                 // Optional: Flash a message or log
                 // setLogs(prev => [...prev, `已自动填入开售时间: ${timeStr}`]);
             }
@@ -1715,8 +1710,9 @@ function App() {
                                                         </a>
                                                         <button
                                                             onClick={() => {
-                                                                navigator.clipboard.writeText(task.paymentUrl);
-                                                                alert("链接已复制");
+                                                                copyText(task.paymentUrl).then((copied) => {
+                                                                    alert(copied ? "链接已复制" : "当前浏览器不支持自动复制，请按提示手动复制");
+                                                                });
                                                             }}
                                                             className="px-3 py-1 bg-gray-700 hover:bg-gray-600 text-white rounded text-xs"
                                                         >
@@ -1797,6 +1793,16 @@ function App() {
                                         </button>
                                     </div>
                                 </div>
+
+                                <SharePresetPanel
+                                    enabled={isWebRuntime}
+                                    lockedTask={buildShareLockedTask()}
+                                    displaySnapshot={buildShareDisplaySnapshot()}
+                                    creatorName={userInfo?.uname}
+                                    creatorUid={userInfo?.mid}
+                                    ticketCount={ticketCount}
+                                    setTicketCount={setTicketCount}
+                                />
 
                                 <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
                                     {/* Column 1: History */}
@@ -2219,14 +2225,13 @@ function App() {
                                                             type="datetime-local"
                                                             step="1"
                                                             className="flex-1 bg-gray-900 border border-gray-700 rounded-lg p-2.5 text-white focus:border-blue-500 focus:outline-none font-mono text-sm"
-                                                            value={timeStart.replace(' ', 'T')}
-                                                            onChange={(e) => setTimeStart(e.target.value.replace('T', ' '))}
+                                                            value={normalizeDateTimeLocalValue(timeStart)}
+                                                            onChange={(e) => setTimeStart(normalizeDateTimeLocalValue(e.target.value).replace('T', ' '))}
                                                         />
                                                         <button
                                                             onClick={() => {
                                                                 const now = new Date();
-                                                                const str = now.toLocaleString('zh-CN', { hour12: false }).replace(/\//g, '-');
-                                                                setTimeStart(str);
+                                                                setTimeStart(formatDateToLocalDateTime(now, true));
                                                             }}
                                                             className="px-3 bg-gray-700 hover:bg-gray-600 rounded-lg text-white font-bold text-xs whitespace-nowrap transition-colors"
                                                             title="设为当前时间"
@@ -2240,8 +2245,7 @@ function App() {
                                                                 const now = new Date();
                                                                 now.setSeconds(59);
                                                                 now.setMilliseconds(900);
-                                                                const str = now.toLocaleString('zh-CN', { hour12: false }).replace(/\//g, '-');
-                                                                setTimeStart(str);
+                                                                setTimeStart(formatDateToLocalDateTime(now, true));
                                                             }}
                                                             className="py-1.5 bg-gray-800 hover:bg-gray-700 border border-gray-700 rounded text-xs text-gray-300 transition-colors"
                                                         >
@@ -2254,8 +2258,7 @@ function App() {
                                                                     const now = new Date();
                                                                     now.setMinutes(now.getMinutes() + m);
                                                                     now.setSeconds(0);
-                                                                    const str = now.toLocaleString('zh-CN', { hour12: false }).replace(/\//g, '-');
-                                                                    setTimeStart(str);
+                                                                    setTimeStart(formatDateToLocalDateTime(now, true));
                                                                 }}
                                                                 className="py-1.5 bg-gray-800 hover:bg-gray-700 border border-gray-700 rounded text-xs text-gray-300 transition-colors"
                                                             >
@@ -2587,8 +2590,9 @@ function App() {
                                                 </button>
                                                 <button
                                                     onClick={() => {
-                                                        navigator.clipboard.writeText(JSON.stringify(acc.cookies));
-                                                        alert("Cookies 已复制到剪贴板");
+                                                        copyText(JSON.stringify(acc.cookies)).then((copied) => {
+                                                            alert(copied ? "Cookies 已复制到剪贴板" : "当前浏览器不支持自动复制，请按提示手动复制");
+                                                        });
                                                     }}
                                                     className="p-2 bg-gray-700 hover:bg-gray-600 text-gray-300 rounded-lg"
                                                     title="复制 Cookies"

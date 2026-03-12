@@ -4,5 +4,6 @@ pub mod buy;
 pub mod config;
 pub mod core;
 pub mod headless;
+pub mod share;
 pub mod storage;
 pub mod util;
