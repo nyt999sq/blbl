@@ -3,26 +3,63 @@
     windows_subsystem = "windows"
 )]
 
-mod auth;
-mod buy;
-mod config;
-mod util;
-mod api;
-mod storage;
-
-// use tauri::Manager;
-use buy::TicketInfo;
-use storage::{Account, HistoryItem, ProjectConfig};
-use std::fs;
+use bili_ticker_buy_rust::api;
+use bili_ticker_buy_rust::auth;
+use bili_ticker_buy_rust::buy;
+use bili_ticker_buy_rust::buy::TicketInfo;
+use bili_ticker_buy_rust::core::events::{now_ts_millis, TaskEvent, TaskEventSink};
+use bili_ticker_buy_rust::storage;
+use bili_ticker_buy_rust::storage::{Account, HistoryItem, ProjectConfig};
 use std::collections::HashMap;
-use std::sync::{Arc, Mutex};
+use std::fs;
 use std::sync::atomic::{AtomicBool, Ordering};
-use uuid::Uuid;
-use tauri::AppHandle;
+use std::sync::{Arc, Mutex};
 use tauri::api::path::app_config_dir;
+use tauri::AppHandle;
+use uuid::Uuid;
 
 struct AppState {
     tasks: Mutex<HashMap<String, Arc<AtomicBool>>>,
+}
+
+struct TauriEventSink {
+    window: tauri::Window,
+}
+
+impl TaskEventSink for TauriEventSink {
+    fn emit_log(&self, task_id: &str, message: &str) {
+        let _ = self.window.emit(
+            "log",
+            TaskEvent::Log {
+                task_id: task_id.to_string(),
+                message: message.to_string(),
+                ts: now_ts_millis(),
+            },
+        );
+    }
+
+    fn emit_payment_qrcode(&self, task_id: &str, url: &str) {
+        let _ = self.window.emit(
+            "payment_qrcode",
+            TaskEvent::PaymentQrcode {
+                task_id: task_id.to_string(),
+                url: url.to_string(),
+                ts: now_ts_millis(),
+            },
+        );
+    }
+
+    fn emit_task_result(&self, task_id: &str, success: bool, message: &str) {
+        let _ = self.window.emit(
+            "task_result",
+            TaskEvent::TaskResult {
+                task_id: task_id.to_string(),
+                success,
+                message: message.to_string(),
+                ts: now_ts_millis(),
+            },
+        );
+    }
 }
 
 #[tauri::command]
@@ -33,8 +70,8 @@ fn greet(name: &str) -> String {
 #[tauri::command]
 fn save_cookies(app_handle: AppHandle, cookies: String) -> Result<(), String> {
     // 1. 获取该应用专用的配置目录路径 (如: ~/Library/Application Support/com.nekomirra.bilitickerbuy)
-    let mut config_path = app_config_dir(&app_handle.config())
-        .ok_or_else(|| "无法获取配置目录".to_string())?;
+    let mut config_path =
+        app_config_dir(&app_handle.config()).ok_or_else(|| "无法获取配置目录".to_string())?;
 
     // 2. 确保目录存在
     if !config_path.exists() {
@@ -50,9 +87,9 @@ fn save_cookies(app_handle: AppHandle, cookies: String) -> Result<(), String> {
 
 #[tauri::command]
 fn load_cookies(app_handle: AppHandle) -> Result<String, String> {
-    let mut config_path = app_config_dir(&app_handle.config())
-        .ok_or_else(|| "无法获取配置目录".to_string())?;
-    
+    let mut config_path =
+        app_config_dir(&app_handle.config()).ok_or_else(|| "无法获取配置目录".to_string())?;
+
     config_path.push("cookies.json");
 
     if config_path.exists() {
@@ -70,14 +107,16 @@ fn get_accounts() -> Result<Vec<Account>, String> {
 #[tauri::command]
 async fn add_account(cookies: Vec<String>) -> Result<Account, String> {
     // Fetch user info to get uid, name, face
-    let res = api::fetch_user_info(cookies.clone()).await.map_err(|e| e.to_string())?;
-    
+    let res = api::fetch_user_info(cookies.clone())
+        .await
+        .map_err(|e| e.to_string())?;
+
     if res["code"].as_i64().unwrap_or(-1) != 0 {
         return Err("Invalid cookies".to_string());
     }
 
     let data = &res["data"];
-    
+
     let level = data["level_info"]["current_level"].as_i64().unwrap_or(0) as i32;
     let is_vip = data["vipStatus"].as_i64().unwrap_or(0) == 1;
     let coins = data["money"].as_f64().unwrap_or(0.0);
@@ -94,7 +133,7 @@ async fn add_account(cookies: Vec<String>) -> Result<Account, String> {
 
     // Load existing accounts
     let mut accounts = storage::get_accounts().map_err(|e| e.to_string())?;
-    
+
     // Remove existing if same uid
     accounts.retain(|a| a.uid != account.uid);
     accounts.push(account.clone());
@@ -145,22 +184,21 @@ fn remove_project_history(project_id: String, sku_id: String) -> Result<(), Stri
 
 #[tauri::command]
 async fn get_user_info(cookies: Vec<String>) -> Result<serde_json::Value, String> {
-    api::fetch_user_info(cookies).await.map_err(|e| e.to_string())
+    api::fetch_user_info(cookies)
+        .await
+        .map_err(|e| e.to_string())
 }
 
 #[tauri::command]
-fn get_login_qrcode() -> Result<(String, String), String> {
-    auth::generate_qrcode().map_err(|e| e.to_string())
+async fn get_login_qrcode() -> Result<(String, String), String> {
+    auth::generate_qrcode().await.map_err(|e| e.to_string())
 }
 
 #[tauri::command]
 async fn poll_login_status(qrcode_key: String) -> Result<String, String> {
-    let key = qrcode_key.clone();
-    let res = tauri::async_runtime::spawn_blocking(move || {
-        auth::poll_login(&key)
-    }).await.map_err(|e| e.to_string())?;
-    
-    res.map_err(|e| e.to_string())
+    auth::poll_login(&qrcode_key)
+        .await
+        .map_err(|e| e.to_string())
 }
 
 #[tauri::command]
@@ -169,28 +207,38 @@ async fn fetch_project(id: String) -> Result<serde_json::Value, String> {
 }
 
 #[tauri::command]
-async fn fetch_buyer_list(project_id: String, cookies: Vec<String>) -> Result<serde_json::Value, String> {
-    api::fetch_buyers(project_id, cookies).await.map_err(|e| e.to_string())
+async fn fetch_buyer_list(
+    project_id: String,
+    cookies: Vec<String>,
+) -> Result<serde_json::Value, String> {
+    api::fetch_buyers(project_id, cookies)
+        .await
+        .map_err(|e| e.to_string())
 }
 
 #[tauri::command]
 async fn fetch_address_list(cookies: Vec<String>) -> Result<serde_json::Value, String> {
-    api::fetch_address_list(cookies).await.map_err(|e| e.to_string())
+    api::fetch_address_list(cookies)
+        .await
+        .map_err(|e| e.to_string())
 }
 
 #[tauri::command]
 async fn sync_time(server_url: Option<String>) -> Result<serde_json::Value, String> {
-    let url = server_url.unwrap_or_else(|| "https://api.bilibili.com/x/report/click/now".to_string());
-    
+    let url =
+        server_url.unwrap_or_else(|| "https://api.bilibili.com/x/report/click/now".to_string());
+
     let server_time = if url.starts_with("http") {
-        api::get_server_time(Some(url)).await.map_err(|e| e.to_string())?
+        api::get_server_time(Some(url))
+            .await
+            .map_err(|e| e.to_string())?
     } else {
         api::get_ntp_time(&url).map_err(|e| e.to_string())? as i64
     };
 
     let local_time = api::get_local_time();
     let diff = server_time - local_time;
-    
+
     Ok(serde_json::json!({
         "diff": diff,
         "server": server_time,
@@ -201,84 +249,119 @@ async fn sync_time(server_url: Option<String>) -> Result<serde_json::Value, Stri
 #[tauri::command]
 async fn start_buy(
     state: tauri::State<'_, AppState>,
-    window: tauri::Window, 
-    ticket_info: String, 
-    interval: u64, 
-    mode: u32, 
+    window: tauri::Window,
+    ticket_info: String,
+    interval: u64,
+    mode: u32,
     total_attempts: u32,
     time_start: Option<String>,
     proxy: Option<String>,
     time_offset: Option<f64>,
     buyers: Option<Vec<serde_json::Value>>,
-    ntp_server: Option<String>
+    ntp_server: Option<String>,
 ) -> Result<String, String> {
     // Filter out empty time_start
     let time_start = time_start.filter(|s| !s.trim().is_empty());
 
     let mut info: TicketInfo = serde_json::from_str(&ticket_info).map_err(|e| e.to_string())?;
-    
+
     // If buyers are provided from UI, override the one in ticket_info
     if let Some(b) = buyers {
         if !b.is_empty() {
             info.buyer_info = serde_json::Value::Array(b.clone());
 
             // Ensure contact info is present and not empty
-            let contact_name_missing = info.contact_name.as_ref().map(|s| s.is_empty()).unwrap_or(true);
-            let contact_tel_missing = info.contact_tel.as_ref().map(|s| s.is_empty()).unwrap_or(true);
+            let contact_name_missing = info
+                .contact_name
+                .as_ref()
+                .map(|s| s.is_empty())
+                .unwrap_or(true);
+            let contact_tel_missing = info
+                .contact_tel
+                .as_ref()
+                .map(|s| s.is_empty())
+                .unwrap_or(true);
 
             if contact_name_missing || contact_tel_missing {
-                 if let Some(first) = b.first() {
-                     if contact_name_missing {
-                         if let Some(name) = first["name"].as_str() {
-                             if !name.is_empty() {
-                                 info.contact_name = Some(name.to_string());
-                             }
-                         }
-                     }
-                     if contact_tel_missing {
-                         // Try different fields for phone
-                         let tel = first["tel"].as_str()
-                             .or(first["mobile"].as_str())
-                             .or(first["phone"].as_str());
-                         
-                         if let Some(t) = tel {
-                             if !t.is_empty() && !t.contains('*') {
-                                 info.contact_tel = Some(t.to_string());
-                             }
-                         }
-                     }
-                 }
+                if let Some(first) = b.first() {
+                    if contact_name_missing {
+                        if let Some(name) = first["name"].as_str() {
+                            if !name.is_empty() {
+                                info.contact_name = Some(name.to_string());
+                            }
+                        }
+                    }
+                    if contact_tel_missing {
+                        // Try different fields for phone
+                        let tel = first["tel"]
+                            .as_str()
+                            .or(first["mobile"].as_str())
+                            .or(first["phone"].as_str());
+
+                        if let Some(t) = tel {
+                            if !t.is_empty() && !t.contains('*') {
+                                info.contact_tel = Some(t.to_string());
+                            }
+                        }
+                    }
+                }
             }
         }
     }
 
     let task_id = Uuid::new_v4().to_string();
     let stop_flag = Arc::new(AtomicBool::new(false));
-    
-    state.tasks.lock().unwrap().insert(task_id.clone(), stop_flag.clone());
+
+    state
+        .tasks
+        .lock()
+        .unwrap()
+        .insert(task_id.clone(), stop_flag.clone());
 
     let task_id_clone = task_id.clone();
+    let sink: Arc<dyn TaskEventSink + Send + Sync> = Arc::new(TauriEventSink { window });
     tauri::async_runtime::spawn(async move {
-        if let Err(e) = buy::start_buy_task(window, task_id_clone, stop_flag, info, interval, mode, total_attempts, time_start, proxy, time_offset, ntp_server).await {
+        if let Err(e) = buy::start_buy_task(
+            sink,
+            task_id_clone,
+            stop_flag,
+            info,
+            interval,
+            mode,
+            total_attempts,
+            time_start,
+            proxy,
+            time_offset,
+            ntp_server,
+        )
+        .await
+        {
             println!("Buy task error: {}", e);
         }
     });
-    
+
     Ok(task_id)
 }
 
 #[tauri::command]
 async fn open_bilibili_home(app: tauri::AppHandle, cookies: Vec<String>) -> Result<(), String> {
-    let cookie_script = cookies.iter().map(|c| {
-        // Extract key=value from Set-Cookie string (which might contain attributes like HttpOnly)
-        let key_val = c.split(';').next().unwrap_or("").trim();
-        if !key_val.is_empty() {
-            format!("document.cookie = '{} ; domain=.bilibili.com; path=/';", key_val.replace("'", "\\'"))
-        } else {
-            String::new()
-        }
-    }).collect::<Vec<_>>().join("\n");
-    
+    let cookie_script = cookies
+        .iter()
+        .map(|c| {
+            // Extract key=value from Set-Cookie string (which might contain attributes like HttpOnly)
+            let key_val = c.split(';').next().unwrap_or("").trim();
+            if !key_val.is_empty() {
+                format!(
+                    "document.cookie = '{} ; domain=.bilibili.com; path=/';",
+                    key_val.replace("'", "\\'")
+                )
+            } else {
+                String::new()
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+
     let init_script = format!(
         "
         (function() {{
@@ -313,14 +396,18 @@ async fn open_bilibili_home(app: tauri::AppHandle, cookies: Vec<String>) -> Resu
     );
 
     let label = format!("bili_home_{}", Uuid::new_v4());
-    
+
     // Start at passport login to ensure we are on the correct domain for cookie setting
-    tauri::WindowBuilder::new(&app, label, tauri::WindowUrl::External("https://passport.bilibili.com/login".parse().unwrap()))
-        .title("Bilibili - 正在跳转...")
-        .initialization_script(&init_script)
-        .inner_size(1280.0, 800.0)
-        .build()
-        .map_err(|e| e.to_string())?;
+    tauri::WindowBuilder::new(
+        &app,
+        label,
+        tauri::WindowUrl::External("https://passport.bilibili.com/login".parse().unwrap()),
+    )
+    .title("Bilibili - 正在跳转...")
+    .initialization_script(&init_script)
+    .inner_size(1280.0, 800.0)
+    .build()
+    .map_err(|e| e.to_string())?;
 
     Ok(())
 }
@@ -328,7 +415,10 @@ async fn open_bilibili_home(app: tauri::AppHandle, cookies: Vec<String>) -> Resu
 #[tauri::command]
 fn export_cookie(uid: String, path: String) -> Result<(), String> {
     let accounts = storage::get_accounts().map_err(|e| e.to_string())?;
-    let account = accounts.iter().find(|a| a.uid == uid).ok_or("Account not found")?;
+    let account = accounts
+        .iter()
+        .find(|a| a.uid == uid)
+        .ok_or("Account not found")?;
 
     let mut cookie_items = Vec::new();
     for c in &account.cookies {
@@ -363,8 +453,10 @@ async fn import_cookie(path: String) -> Result<(), String> {
     let content = fs::read_to_string(path).map_err(|e| e.to_string())?;
     let json: serde_json::Value = serde_json::from_str(&content).map_err(|e| e.to_string())?;
 
-    let items = json["_default"]["1"]["value"].as_array().ok_or("Invalid format: missing _default.1.value")?;
-    
+    let items = json["_default"]["1"]["value"]
+        .as_array()
+        .ok_or("Invalid format: missing _default.1.value")?;
+
     let mut cookies = Vec::new();
     for item in items {
         let name = item["name"].as_str().unwrap_or("");
@@ -395,9 +487,9 @@ fn main() {
             tasks: Mutex::new(HashMap::new()),
         })
         .invoke_handler(tauri::generate_handler![
-            greet, 
-            get_login_qrcode, 
-            poll_login_status, 
+            greet,
+            get_login_qrcode,
+            poll_login_status,
             start_buy,
             stop_task,
             fetch_project,

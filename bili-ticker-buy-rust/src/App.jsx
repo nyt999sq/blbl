@@ -1,7 +1,7 @@
 import { useState, useEffect, useRef } from "react";
-import { invoke } from "@tauri-apps/api/tauri";
-import { listen } from "@tauri-apps/api/event";
-import { isPermissionGranted, requestPermission, sendNotification } from "@tauri-apps/api/notification";
+import { invoke } from "./platform/apiClient";
+import { listen } from "./platform/eventClient";
+import { isPermissionGranted, requestPermission, sendNotification } from "./platform/notificationClient";
 import { Play, Settings, User, FileJson, Terminal, Clock, Bell, Network, Volume2, LogOut, RefreshCw, Search, CheckSquare, Square, Trash2, Plus, History, X, List, Save, Copy, Crown, ExternalLink, Upload, Download, Github, LayoutDashboard, Rocket } from "lucide-react";
 import { QRCodeCanvas } from "qrcode.react";
 import logo from "./assets/logo.png";

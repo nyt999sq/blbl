@@ -1,14 +1,17 @@
+use anyhow::{anyhow, Result};
 use reqwest::Client;
 use serde_json::Value;
-use anyhow::{Result, anyhow};
-use std::time::{SystemTime, UNIX_EPOCH, Duration};
-use std::net::UdpSocket;
 use sntpc;
+use std::net::UdpSocket;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 pub async fn fetch_project_info(id: String) -> Result<Value> {
     let client = Client::new();
-    let url = format!("https://show.bilibili.com/api/ticket/project/getV2?version=134&id={}&project_id={}", id, id);
-    
+    let url = format!(
+        "https://show.bilibili.com/api/ticket/project/getV2?version=134&id={}&project_id={}",
+        id, id
+    );
+
     let mut res: Value = client.get(&url)
         .header("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36")
         .send()
@@ -17,7 +20,10 @@ pub async fn fetch_project_info(id: String) -> Result<Value> {
         .await?;
 
     // Check for linked goods (场贩/周边)
-    let link_url = format!("https://show.bilibili.com/api/ticket/linkgoods/list?project_id={}&page_type=0", id);
+    let link_url = format!(
+        "https://show.bilibili.com/api/ticket/linkgoods/list?project_id={}&page_type=0",
+        id
+    );
     // We don't want to fail the whole request if linkgoods fails, so we wrap in a block
     let link_res_result = client.get(&link_url)
         .header("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36")
@@ -26,23 +32,28 @@ pub async fn fetch_project_info(id: String) -> Result<Value> {
 
     if let Ok(link_resp) = link_res_result {
         if let Ok(link_res) = link_resp.json::<Value>().await {
-             if let Some(list) = link_res["data"]["list"].as_array() {
+            if let Some(list) = link_res["data"]["list"].as_array() {
                 if !list.is_empty() {
                     // Ensure screen_list exists in original response
                     if res["data"]["screen_list"].as_array().is_none() {
-                         if let Some(data) = res["data"].as_object_mut() {
-                             data.insert("screen_list".to_string(), serde_json::json!([]));
-                         }
+                        if let Some(data) = res["data"].as_object_mut() {
+                            data.insert("screen_list".to_string(), serde_json::json!([]));
+                        }
                     }
-        
+
                     for item in list {
                         // Handle id as string or number
-                        let link_id_opt = item["id"].as_str().map(|s| s.to_string())
+                        let link_id_opt = item["id"]
+                            .as_str()
+                            .map(|s| s.to_string())
                             .or_else(|| item["id"].as_i64().map(|i| i.to_string()));
 
                         if let Some(link_id) = link_id_opt {
-                             let detail_url = format!("https://show.bilibili.com/api/ticket/linkgoods/detail?link_id={}", link_id);
-                             if let Ok(detail_resp) = client.get(&detail_url)
+                            let detail_url = format!(
+                                "https://show.bilibili.com/api/ticket/linkgoods/detail?link_id={}",
+                                link_id
+                            );
+                            if let Ok(detail_resp) = client.get(&detail_url)
                                 .header("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36")
                                 .send()
                                 .await 
@@ -72,8 +83,11 @@ pub async fn fetch_project_info(id: String) -> Result<Value> {
 
     // Apply express_fee logic (Match Python TicketService.py)
     if let Some(data) = res["data"].as_object_mut() {
-        let has_eticket = data.get("has_eticket").and_then(|v| v.as_bool()).unwrap_or(false);
-        
+        let has_eticket = data
+            .get("has_eticket")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
+
         if let Some(screen_list) = data.get_mut("screen_list").and_then(|v| v.as_array_mut()) {
             for screen in screen_list {
                 let mut express_fee = 0;
@@ -84,8 +98,10 @@ pub async fn fetch_project_info(id: String) -> Result<Value> {
                         }
                     }
                 }
-                
-                if let Some(ticket_list) = screen.get_mut("ticket_list").and_then(|v| v.as_array_mut()) {
+
+                if let Some(ticket_list) =
+                    screen.get_mut("ticket_list").and_then(|v| v.as_array_mut())
+                {
                     for ticket in ticket_list {
                         if let Some(price) = ticket.get("price").and_then(|v| v.as_i64()) {
                             ticket["price"] = serde_json::json!(price + express_fee);
@@ -101,8 +117,11 @@ pub async fn fetch_project_info(id: String) -> Result<Value> {
 
 pub async fn fetch_buyers(project_id: String, cookies: Vec<String>) -> Result<Value> {
     let client = Client::new();
-    let url = format!("https://show.bilibili.com/api/ticket/buyer/list?is_default&projectId={}", project_id);
-    
+    let url = format!(
+        "https://show.bilibili.com/api/ticket/buyer/list?is_default&projectId={}",
+        project_id
+    );
+
     let mut req = client.get(&url)
         .header("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36");
 
@@ -117,7 +136,7 @@ pub async fn fetch_buyers(project_id: String, cookies: Vec<String>) -> Result<Va
 pub async fn fetch_user_info(cookies: Vec<String>) -> Result<Value> {
     let client = Client::new();
     let url = "https://api.bilibili.com/x/web-interface/nav";
-    
+
     let mut req = client.get(url)
         .header("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36");
 
@@ -131,7 +150,7 @@ pub async fn fetch_user_info(cookies: Vec<String>) -> Result<Value> {
 pub async fn fetch_address_list(cookies: Vec<String>) -> Result<Value> {
     let client = Client::new();
     let url = "https://show.bilibili.com/api/ticket/addr/list";
-    
+
     let mut req = client.get(url)
         .header("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36");
 
@@ -150,14 +169,14 @@ pub async fn get_server_time(url_opt: Option<String>) -> Result<i64> {
 
     // Default to Bilibili if no URL provided
     let url = url_opt.unwrap_or_else(|| "https://api.bilibili.com/x/report/click/now".to_string());
-    
+
     let res: Value = client.get(&url)
         .header("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36")
         .send()
         .await?
         .json()
         .await?;
-    
+
     // 1. Bilibili Format: {"data": {"now": 169...}} (Seconds)
     if let Some(now) = res["data"]["now"].as_i64() {
         return Ok(now * 1000);
@@ -205,10 +224,13 @@ pub fn get_ntp_time(server: &str) -> Result<u64> {
     };
 
     let socket = UdpSocket::bind("0.0.0.0:0").map_err(|e| anyhow!("UDP Bind Error: {:?}", e))?;
-    socket.set_read_timeout(Some(Duration::from_secs(2))).map_err(|e| anyhow!("UDP Timeout Error: {:?}", e))?;
+    socket
+        .set_read_timeout(Some(Duration::from_secs(2)))
+        .map_err(|e| anyhow!("UDP Timeout Error: {:?}", e))?;
 
-    let result = sntpc::simple_get_time(&address, &socket).map_err(|e| anyhow!("NTP Error: {:?}", e))?;
-    
+    let result =
+        sntpc::simple_get_time(&address, &socket).map_err(|e| anyhow!("NTP Error: {:?}", e))?;
+
     // sntpc 0.3.5: sec() is a method.
     // Note: We are ignoring nanoseconds for now as we are unsure of the API method name in 0.3.5.
     // TODO: Add nanoseconds precision.

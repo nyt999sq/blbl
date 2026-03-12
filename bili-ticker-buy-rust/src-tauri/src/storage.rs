@@ -1,18 +1,50 @@
+use anyhow::Result;
 use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::PathBuf;
-use anyhow::Result;
+use std::sync::{Mutex, OnceLock};
+#[cfg(feature = "desktop")]
 use tauri::api::path::app_config_dir;
+#[cfg(feature = "desktop")]
 use tauri::Config;
 
-// 获取通用的存储路径
-fn get_storage_path(file_name: &str) -> PathBuf {
-    // 这里的 Config::default() 对应 tauri.conf.json 的配置
-    // macOS 下通常指向 ~/Library/Application Support/com.nekomirra.bilitickerbuy/
-    let mut path = app_config_dir(&Config::default()).unwrap_or_else(|| PathBuf::from("."));
+static DATA_DIR_OVERRIDE: OnceLock<Mutex<Option<PathBuf>>> = OnceLock::new();
+
+fn data_dir_override() -> &'static Mutex<Option<PathBuf>> {
+    DATA_DIR_OVERRIDE.get_or_init(|| Mutex::new(None))
+}
+
+pub fn set_data_dir(path: Option<PathBuf>) {
+    if let Ok(mut slot) = data_dir_override().lock() {
+        *slot = path;
+    }
+}
+
+fn get_storage_root() -> PathBuf {
+    if let Ok(slot) = data_dir_override().lock() {
+        if let Some(path) = slot.clone() {
+            if !path.exists() {
+                let _ = fs::create_dir_all(&path);
+            }
+            return path;
+        }
+    }
+
+    #[cfg(feature = "desktop")]
+    let path = app_config_dir(&Config::default()).unwrap_or_else(|| PathBuf::from("."));
+
+    #[cfg(not(feature = "desktop"))]
+    let path = PathBuf::from("./data");
+
     if !path.exists() {
         let _ = fs::create_dir_all(&path);
     }
+    path
+}
+
+// 获取通用的存储路径
+fn get_storage_path(file_name: &str) -> PathBuf {
+    let mut path = get_storage_root();
     path.push(file_name);
     path
 }
@@ -109,10 +141,12 @@ pub fn get_project_history() -> Result<Vec<ProjectConfig>> {
 pub fn add_project_history(item: ProjectConfig) -> Result<()> {
     let path = get_storage_path("project_history.json");
     let mut history = get_project_history()?;
-    
+
     if item.sku_id.is_empty() {
         history.retain(|p| !(p.project_id == item.project_id && p.sku_id.is_empty()));
-        let has_specific = history.iter().any(|p| p.project_id == item.project_id && !p.sku_id.is_empty());
+        let has_specific = history
+            .iter()
+            .any(|p| p.project_id == item.project_id && !p.sku_id.is_empty());
         if !has_specific {
             history.insert(0, item);
         }
@@ -138,4 +172,41 @@ pub fn remove_project_history_item(project_id: String, sku_id: String) -> Result
     let json = serde_json::to_string_pretty(&history)?;
     fs::write(path, json)?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use uuid::Uuid;
+
+    fn make_test_dir() -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("bili-storage-test-{}", Uuid::new_v4()));
+        let _ = fs::create_dir_all(&dir);
+        dir
+    }
+
+    #[test]
+    fn uses_data_dir_override_for_accounts() {
+        let test_dir = make_test_dir();
+        set_data_dir(Some(test_dir.clone()));
+
+        let accounts = vec![Account {
+            uid: "123".to_string(),
+            name: "tester".to_string(),
+            face: "".to_string(),
+            cookies: vec!["a=b".to_string()],
+            level: 1,
+            is_vip: false,
+            coins: 0.0,
+        }];
+
+        save_accounts(&accounts).expect("save accounts");
+        let loaded = get_accounts().expect("load accounts");
+        assert_eq!(loaded.len(), 1);
+        assert_eq!(loaded[0].uid, "123");
+        assert!(test_dir.join("accounts.json").exists());
+
+        set_data_dir(None);
+        let _ = fs::remove_dir_all(test_dir);
+    }
 }

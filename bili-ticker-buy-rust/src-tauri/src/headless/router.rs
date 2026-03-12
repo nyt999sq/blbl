@@ -1,0 +1,51 @@
+use crate::headless::auth;
+use crate::headless::handlers;
+use crate::headless::ws;
+use crate::headless::HeadlessState;
+use axum::middleware;
+use axum::routing::{delete, get, post};
+use axum::Router;
+use std::path::PathBuf;
+use tower_http::cors::CorsLayer;
+use tower_http::services::ServeDir;
+
+pub fn build_router(state: HeadlessState, static_dir: PathBuf) -> Router {
+    let public_routes = Router::new()
+        .route("/api/auth/token-login", post(handlers::token_login))
+        .route("/api/login/qrcode", get(handlers::get_login_qrcode))
+        .route("/api/login/poll", get(handlers::poll_login_status))
+        .route("/api/ws", get(ws::ws_handler));
+
+    let protected_routes = Router::new()
+        .route("/api/accounts/import-cookie", post(handlers::import_cookie))
+        .route("/api/accounts", get(handlers::get_accounts))
+        .route("/api/accounts/:uid", delete(handlers::delete_account))
+        .route("/api/project/fetch", post(handlers::fetch_project))
+        .route("/api/project/buyers", post(handlers::fetch_buyers))
+        .route("/api/project/addresses", post(handlers::fetch_addresses))
+        .route("/api/user/info", post(handlers::get_user_info))
+        .route("/api/time/sync", post(handlers::sync_time))
+        .route("/api/task/start", post(handlers::start_task))
+        .route("/api/task/stop", post(handlers::stop_task))
+        .route(
+            "/api/history",
+            get(handlers::get_history).delete(handlers::clear_history),
+        )
+        .route("/api/project-history", get(handlers::get_project_history))
+        .route("/api/project-history", post(handlers::add_project_history))
+        .route(
+            "/api/project-history",
+            delete(handlers::delete_project_history),
+        )
+        .layer(middleware::from_fn_with_state(
+            state.clone(),
+            auth::require_session,
+        ));
+
+    Router::new()
+        .merge(public_routes)
+        .merge(protected_routes)
+        .fallback_service(ServeDir::new(static_dir).append_index_html_on_directories(true))
+        .layer(CorsLayer::permissive())
+        .with_state(state)
+}
