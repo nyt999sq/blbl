@@ -60,6 +60,10 @@ pub fn build_router(state: HeadlessState, static_dir: PathBuf) -> Router {
             "/api/share/presets/:id/export-config",
             get(handlers::export_share_preset_config),
         )
+        .route(
+            "/api/share/presets/:id/start-task",
+            post(handlers::start_share_preset_task),
+        )
         .layer(middleware::from_fn_with_state(
             state.clone(),
             auth::require_session,

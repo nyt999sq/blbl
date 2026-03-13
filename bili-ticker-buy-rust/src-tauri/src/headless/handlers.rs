@@ -11,6 +11,7 @@ use crate::share::{
     SharePresetRecord, SharePresetStatus, ShareSubmissionInput, ShareSubmissionSummary,
 };
 use crate::storage::{self, Account, ProjectConfig};
+use anyhow::anyhow;
 use axum::extract::{Path, Query, State};
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
@@ -158,7 +159,20 @@ fn spawn_buy_task(
     info: TicketInfo,
     options: SpawnTaskOptions,
 ) -> SpawnTaskResult {
-    let task_id = Uuid::new_v4().to_string();
+    spawn_buy_task_with_id(
+        state,
+        Uuid::new_v4().to_string(),
+        info,
+        options,
+    )
+}
+
+fn spawn_buy_task_with_id(
+    state: &HeadlessState,
+    task_id: String,
+    info: TicketInfo,
+    options: SpawnTaskOptions,
+) -> SpawnTaskResult {
     let stop_flag = Arc::new(AtomicBool::new(false));
     state
         .tasks
@@ -409,6 +423,8 @@ pub async fn sync_time(Json(req): Json<SyncTimeRequest>) -> Response {
 
 #[derive(Debug, Deserialize)]
 pub struct StartTaskRequest {
+    #[serde(alias = "taskId")]
+    pub task_id: Option<String>,
     #[serde(alias = "ticketInfo")]
     pub ticket_info: String,
     pub interval: u64,
@@ -439,19 +455,20 @@ pub async fn start_task(
         Err(e) => return error_response(StatusCode::BAD_REQUEST, e.to_string()).into_response(),
     };
     merge_buyer_overrides(&mut info, req.buyers.clone());
-    let spawned = spawn_buy_task(
-        &state,
-        info,
-        SpawnTaskOptions {
-            interval: req.interval,
-            mode: req.mode,
-            total_attempts: req.total_attempts,
-            time_start: req.time_start.filter(|s| !s.trim().is_empty()),
-            proxy: req.proxy,
-            time_offset: req.time_offset,
-            ntp_server: req.ntp_server,
-        },
-    );
+    let options = SpawnTaskOptions {
+        interval: req.interval,
+        mode: req.mode,
+        total_attempts: req.total_attempts,
+        time_start: req.time_start.filter(|s| !s.trim().is_empty()),
+        proxy: req.proxy,
+        time_offset: req.time_offset,
+        ntp_server: req.ntp_server,
+    };
+    let spawned = if let Some(task_id) = req.task_id {
+        spawn_buy_task_with_id(&state, task_id, info, options)
+    } else {
+        spawn_buy_task(&state, info, options)
+    };
 
     (
         StatusCode::OK,
@@ -826,8 +843,14 @@ pub struct SubmitSharePresetResponse {
     pub message: String,
 }
 
+#[derive(Debug, Deserialize)]
+pub struct StartSharePresetTaskRequest {
+    #[serde(alias = "taskId")]
+    pub task_id: Option<String>,
+}
+
 pub async fn submit_share_preset(
-    State(state): State<HeadlessState>,
+    State(_state): State<HeadlessState>,
     Path(token): Path<String>,
     Json(req): Json<ShareSubmissionInput>,
 ) -> Response {
@@ -863,24 +886,7 @@ pub async fn submit_share_preset(
         Err(e) => return error_response(StatusCode::BAD_REQUEST, e.to_string()).into_response(),
     };
     let export_config = build_share_submission_export_config(info.clone(), &preset.locked_task);
-
-    let spawned = spawn_buy_task(
-        &state,
-        info,
-        SpawnTaskOptions {
-            interval: preset.locked_task.interval,
-            mode: preset.locked_task.mode,
-            total_attempts: preset.locked_task.total_attempts,
-            time_start: preset
-                .locked_task
-                .time_start
-                .clone()
-                .filter(|value| !value.trim().is_empty()),
-            proxy: preset.locked_task.proxy.clone(),
-            time_offset: None,
-            ntp_server: preset.locked_task.ntp_server.clone(),
-        },
-    );
+    let pending_task_id = Uuid::new_v4().to_string();
 
     let submitter_uid = user_info["data"]["mid"]
         .as_str()
@@ -899,8 +905,8 @@ pub async fn submit_share_preset(
         submitted_at: current_unix_secs(),
         submitter_uid,
         submitter_name,
-        task_id: spawned.task_id.clone(),
-        task_status: spawned.task_status.clone(),
+        task_id: pending_task_id.clone(),
+        task_status: "pending".to_string(),
         buyer_count: preset_mut.locked_task.count,
     });
     preset_mut.last_submission_export = Some(export_config);
@@ -912,14 +918,93 @@ pub async fn submit_share_preset(
     (
         StatusCode::OK,
         Json(SubmitSharePresetResponse {
-            task_id: spawned.task_id,
-            task_status: spawned.task_status.clone(),
-            message: if spawned.task_status == "scheduled" {
-                "信息提交成功，任务已创建，等待开抢时间".to_string()
-            } else {
-                "信息提交成功，任务已启动".to_string()
-            },
+            task_id: pending_task_id,
+            task_status: "pending".to_string(),
+            message: "信息提交成功，等待发起人在后台任务列表中启动抢票".to_string(),
         }),
     )
         .into_response()
+}
+
+pub async fn start_share_preset_task(
+    State(state): State<HeadlessState>,
+    Path(id): Path<String>,
+    Json(req): Json<StartSharePresetTaskRequest>,
+) -> Response {
+    let _share_guard = share_submit_lock().lock().await;
+    let now = current_unix_secs();
+
+    let result = storage::with_share_presets_mut(|presets| {
+        normalize_share_presets(presets);
+        let preset = presets
+            .iter_mut()
+            .find(|preset| preset.id == id)
+            .ok_or_else(|| anyhow::anyhow!("分享链接不存在"))?;
+
+        let last_submission = preset
+            .last_submission
+            .as_mut()
+            .ok_or_else(|| anyhow::anyhow!("该分享链接还没有提交记录"))?;
+
+        if last_submission.task_status != "pending" {
+            return Err(anyhow!(
+                "该分享任务当前状态为 {}，不能重复启动",
+                last_submission.task_status
+            ));
+        }
+
+        let export = preset
+            .last_submission_export
+            .clone()
+            .ok_or_else(|| anyhow::anyhow!("该分享记录没有可启动的配置"))?;
+
+        let task_id = req
+            .task_id
+            .clone()
+            .unwrap_or_else(|| last_submission.task_id.clone());
+
+        let spawned = spawn_buy_task_with_id(
+            &state,
+            task_id.clone(),
+            export.ticket_info.clone(),
+            SpawnTaskOptions {
+                interval: export.interval,
+                mode: export.mode,
+                total_attempts: export.total_attempts,
+                time_start: export
+                    .time_start
+                    .clone()
+                    .filter(|value| !value.trim().is_empty()),
+                proxy: export.proxy.clone(),
+                time_offset: export.time_offset,
+                ntp_server: export.ntp_server.clone(),
+            },
+        );
+
+        last_submission.task_id = task_id;
+        last_submission.task_status = spawned.task_status.clone();
+        last_submission.submitted_at = now;
+
+        Ok(spawned)
+    });
+
+    match result {
+        Ok(spawned) => (
+            StatusCode::OK,
+            Json(SubmitSharePresetResponse {
+                task_id: spawned.task_id,
+                task_status: spawned.task_status.clone(),
+                message: if spawned.task_status == "scheduled" {
+                    "分享任务已启动，等待开抢时间".to_string()
+                } else {
+                    "分享任务已启动".to_string()
+                },
+            }),
+        )
+            .into_response(),
+        Err(e) if e.to_string().contains("不存在") => {
+            error_response(StatusCode::NOT_FOUND, e.to_string()).into_response()
+        }
+        Err(e) => error_response(StatusCode::BAD_REQUEST, e.to_string()).into_response(),
+    }
 }

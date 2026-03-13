@@ -227,6 +227,7 @@ async function invokeWeb(command: string, args: InvokeArgs): Promise<any> {
       });
     case "start_buy":
       return webRequest("POST", "/api/task/start", {
+        taskId: args?.taskId || args?.task_id || null,
         ticketInfo: args?.ticketInfo || args?.ticket_info || "",
         interval: args?.interval || 1000,
         mode: args?.mode || 0,
@@ -315,6 +316,18 @@ export async function exportSharePresetConfig(id: string): Promise<any> {
     throw new Error("导出代抢配置仅支持 headless Web 模式");
   }
   return webRequest("GET", `/api/share/presets/${encodeURIComponent(id)}/export-config`);
+}
+
+export async function startSharePresetTask(
+  id: string,
+  taskId?: string
+): Promise<any> {
+  if (isTauriRuntime()) {
+    throw new Error("启动分享任务仅支持 headless Web 模式");
+  }
+  return webRequest("POST", `/api/share/presets/${encodeURIComponent(id)}/start-task`, {
+    taskId: taskId || null,
+  });
 }
 
 export async function loginWithAdminToken(token: string): Promise<string | null> {

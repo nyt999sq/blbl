@@ -1,5 +1,5 @@
 import { useState, useEffect, useRef } from "react";
-import { clearAdminAuth, invoke } from "./platform/apiClient";
+import { clearAdminAuth, invoke, listSharePresets, startSharePresetTask } from "./platform/apiClient";
 import { listen } from "./platform/eventClient";
 import { isPermissionGranted, requestPermission, sendNotification } from "./platform/notificationClient";
 import { isTauriRuntime } from "./platform/runtime";
@@ -12,6 +12,7 @@ import {
     getBuyerPhone,
     normalizeAddress,
 } from "./share/sharePayload";
+import { mergeSubmittedShareTasks } from "./share/shareTaskSync.js";
 import {
     formatDateToLocalDateTime,
     normalizeDateTimeLocalValue,
@@ -315,8 +316,21 @@ function App({ onAdminLogout }) {
         await loadAccounts();
         await loadHistory();
         await loadProjectHistory(); // New
+        await syncSubmittedShareTasks();
         // 启动时只同步一次时间
         await syncTime(true);
+    }
+
+    async function syncSubmittedShareTasks() {
+        if (!isWebRuntime) return;
+        try {
+            const presets = await listSharePresets();
+            if (Array.isArray(presets)) {
+                setTasks((prev) => mergeSubmittedShareTasks(prev, presets));
+            }
+        } catch (error) {
+            console.error("Failed to sync submitted share tasks", error);
+        }
     }
 
     async function loadProjectHistory() {
@@ -446,6 +460,16 @@ function App({ onAdminLogout }) {
     useEffect(() => {
         logsEndRef.current?.scrollIntoView({ behavior: "smooth" });
     }, [logs]);
+
+    useEffect(() => {
+        if (!isWebRuntime) return undefined;
+
+        const timer = setInterval(() => {
+            syncSubmittedShareTasks();
+        }, 5000);
+
+        return () => clearInterval(timer);
+    }, [isWebRuntime]);
 
     async function startAddAccount() {
         setShowLoginModal(true);
@@ -615,6 +639,9 @@ function App({ onAdminLogout }) {
         }
 
         const config = buildConfigSnapshot({
+            accountCookies: cookies,
+            accountUid: userInfo?.mid,
+            accountName: userInfo?.uname,
             projectId,
             projectInfo,
             selectedScreen,
@@ -651,6 +678,17 @@ function App({ onAdminLogout }) {
         reader.onload = async (ev) => {
             try {
                 const importedConfig = normalizeImportedConfig(JSON.parse(ev.target.result));
+                if (importedConfig.accountCookies.length > 0) {
+                    try {
+                        const importedAccount = await invoke("add_account", {
+                            cookies: importedConfig.accountCookies,
+                        });
+                        await loadAccounts();
+                        await handleUseAccount(importedAccount);
+                    } catch (accountError) {
+                        throw new Error(`配置文件中的账号信息无效，无法自动登录: ${accountError}`);
+                    }
+                }
                 setProjectId(importedConfig.projectId);
                 setTimeStart(importedConfig.timeStart);
                 setRequestInterval(importedConfig.interval);
@@ -675,23 +713,48 @@ function App({ onAdminLogout }) {
                     const res = await invoke("fetch_project", { id: importedConfig.projectId });
                     if (res.code === 0 && res.data) {
                         setProjectInfo(res.data);
+                        let restoredScreen = null;
+                        let restoredSku = null;
 
                         if (importedConfig.screenId) {
                             const screen = (res.data.screen_list || res.data.screens || []).find(s => String(s.id) === String(importedConfig.screenId));
                             if (screen) {
                                 setSelectedScreen(screen);
+                                restoredScreen = screen;
                                 if (importedConfig.skuId) {
                                     const sku = (screen.ticket_list || []).find(s => String(s.id) === String(importedConfig.skuId));
-                                    if (sku) setSelectedSku(sku);
+                                    if (sku) {
+                                        setSelectedSku(sku);
+                                        restoredSku = sku;
+                                    }
                                 }
                             }
+                        }
+
+                        if (restoredScreen && restoredSku) {
+                            await invoke("add_project_history", {
+                                item: {
+                                    project_id: importedConfig.projectId,
+                                    project_name: res.data.name || importedConfig.projectName || importedConfig.projectId,
+                                    screen_id: String(restoredScreen.id),
+                                    screen_name: restoredScreen.name || "",
+                                    sku_id: String(restoredSku.id),
+                                    sku_name: restoredSku.desc || "",
+                                    price: restoredSku.price || 0,
+                                }
+                            });
+                            await loadProjectHistory();
                         }
                     }
                 }
 
-                if (cookies && importedConfig.projectId) {
-                    await fetchBuyers(cookies, importedConfig.projectId);
-                    await fetchAddresses(cookies, importedConfig.selectedAddress);
+                const importedCookies = importedConfig.accountCookies.length > 0
+                    ? importedConfig.accountCookies
+                    : cookies;
+
+                if (importedCookies && importedConfig.projectId) {
+                    await fetchBuyers(importedCookies, importedConfig.projectId);
+                    await fetchAddresses(importedCookies, importedConfig.selectedAddress);
                     alert("配置导入成功！");
                 } else if (importedConfig.selectedBuyerIds.length > 0) {
                     alert("配置导入成功，项目和策略已恢复。登录账号后将继续恢复购票人。");
@@ -1184,26 +1247,30 @@ function App({ onAdminLogout }) {
 
     async function runPendingTask(task) {
         try {
-            // Remove the pending task
-            setTasks(prev => prev.filter(t => t.id !== task.id));
+            let taskId = task.id;
+            let nextStatus = "running";
 
-            // Start the actual task
-            const taskId = await invoke("start_buy", task.args);
+            if (task.source === "share_submission" && task.sharePresetId) {
+                const result = await startSharePresetTask(task.sharePresetId, task.id);
+                taskId = result?.task_id || task.id;
+                nextStatus = result?.task_status || "running";
+            } else {
+                taskId = await invoke("start_buy", task.args);
+                nextStatus = task.args?.timeStart ? "scheduled" : "running";
+            }
 
             const runningTask = {
                 ...task,
                 id: taskId,
                 startTime: new Date().toLocaleTimeString(),
-                status: "running",
-                lastLog: "Starting...",
+                status: nextStatus,
+                lastLog: nextStatus === "scheduled" ? `Waiting for ${task.args?.timeStart || ""}` : "Starting...",
                 logs: []
             };
 
-            setTasks(prev => [runningTask, ...prev]);
+            setTasks(prev => prev.map(t => t.id === task.id ? runningTask : t));
         } catch (e) {
             alert("启动任务失败: " + e);
-            // Put it back if failed? Or just leave it removed? 
-            // Better to keep it as pending if failed, but for simplicity let's just alert.
         }
     }
 
