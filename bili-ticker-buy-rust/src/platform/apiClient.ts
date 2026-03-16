@@ -285,6 +285,28 @@ export async function getPublicSharePreset(token: string): Promise<any> {
   return publicRequest("GET", `/api/share/${encodeURIComponent(token)}`);
 }
 
+export async function getSmsLoginCountries(): Promise<any> {
+  return publicRequest("GET", "/api/login/sms/countries");
+}
+
+export async function getSmsLoginCaptcha(): Promise<any> {
+  return publicRequest("GET", "/api/login/sms/captcha");
+}
+
+export async function sendSmsLoginCode(payload: Record<string, any>): Promise<any> {
+  return publicRequest("POST", "/api/login/sms/send-code", payload);
+}
+
+export async function verifySmsLoginCode(payload: Record<string, any>): Promise<any> {
+  return publicRequest("POST", "/api/login/sms/verify-code", payload);
+}
+
+export async function fetchShareUserInfo(token: string, cookies: string[]): Promise<any> {
+  return publicRequest("POST", `/api/share/${encodeURIComponent(token)}/user-info`, {
+    cookies,
+  });
+}
+
 export async function fetchShareBuyers(token: string, cookies: string[]): Promise<any> {
   return publicRequest("POST", `/api/share/${encodeURIComponent(token)}/buyers`, {
     cookies,
@@ -328,6 +350,48 @@ export async function startSharePresetTask(
   return webRequest("POST", `/api/share/presets/${encodeURIComponent(id)}/start-task`, {
     taskId: taskId || null,
   });
+}
+
+export async function listTasks(): Promise<any> {
+  if (isTauriRuntime()) {
+    return [];
+  }
+  return webRequest("GET", "/api/tasks");
+}
+
+export async function createTask(payload: Record<string, any>): Promise<any> {
+  if (isTauriRuntime()) {
+    throw new Error("统一任务列表当前仅支持 headless Web 模式");
+  }
+  return webRequest("POST", "/api/tasks", payload);
+}
+
+export async function startTaskRecord(id: string): Promise<any> {
+  if (isTauriRuntime()) {
+    throw new Error("统一任务列表当前仅支持 headless Web 模式");
+  }
+  return webRequest("POST", `/api/tasks/${encodeURIComponent(id)}/start`);
+}
+
+export async function stopTaskRecord(id: string): Promise<any> {
+  if (isTauriRuntime()) {
+    throw new Error("统一任务列表当前仅支持 headless Web 模式");
+  }
+  return webRequest("POST", `/api/tasks/${encodeURIComponent(id)}/stop`);
+}
+
+export async function deleteTaskRecord(id: string): Promise<any> {
+  if (isTauriRuntime()) {
+    throw new Error("统一任务列表当前仅支持 headless Web 模式");
+  }
+  return webRequest("DELETE", `/api/tasks/${encodeURIComponent(id)}`);
+}
+
+export async function updateTaskRecord(id: string, payload: Record<string, any>): Promise<any> {
+  if (isTauriRuntime()) {
+    throw new Error("统一任务列表当前仅支持 headless Web 模式");
+  }
+  return webRequest("PATCH", `/api/tasks/${encodeURIComponent(id)}`, payload);
 }
 
 export async function loginWithAdminToken(token: string): Promise<string | null> {

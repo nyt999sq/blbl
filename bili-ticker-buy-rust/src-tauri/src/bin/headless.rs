@@ -3,6 +3,7 @@ use bili_ticker_buy_rust::headless::auth::new_session_store;
 use bili_ticker_buy_rust::headless::router::build_router;
 use bili_ticker_buy_rust::headless::ws::WsHub;
 use bili_ticker_buy_rust::headless::HeadlessState;
+use bili_ticker_buy_rust::storage;
 use clap::{Parser, Subcommand};
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -56,6 +57,7 @@ async fn main() -> anyhow::Result<()> {
 
             let data_root = data_dir.unwrap_or_else(|| PathBuf::from("./data"));
             configure_data_dir(Some(data_root.clone()));
+            storage::prepare_tasks_for_runtime()?;
 
             let static_dir = if PathBuf::from("../dist").exists() {
                 PathBuf::from("../dist")

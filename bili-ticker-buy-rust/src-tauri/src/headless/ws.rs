@@ -1,6 +1,7 @@
 use crate::core::events::{now_ts_millis, TaskEvent, TaskEventSink};
 use crate::headless::auth;
 use crate::headless::HeadlessState;
+use crate::storage::{self, TaskStatus};
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
 use axum::extract::{Query, State};
 use axum::http::StatusCode;
@@ -41,6 +42,7 @@ impl WsEventSink {
 
 impl TaskEventSink for WsEventSink {
     fn emit_log(&self, task_id: &str, message: &str) {
+        let _ = storage::append_task_log(task_id, message);
         self.hub.publish(TaskEvent::Log {
             task_id: task_id.to_string(),
             message: message.to_string(),
@@ -49,6 +51,7 @@ impl TaskEventSink for WsEventSink {
     }
 
     fn emit_payment_qrcode(&self, task_id: &str, url: &str) {
+        let _ = storage::update_task_payment_url(task_id, url);
         self.hub.publish(TaskEvent::PaymentQrcode {
             task_id: task_id.to_string(),
             url: url.to_string(),
@@ -57,6 +60,17 @@ impl TaskEventSink for WsEventSink {
     }
 
     fn emit_task_result(&self, task_id: &str, success: bool, message: &str) {
+        let status = if success {
+            TaskStatus::Success
+        } else if message.contains("Task stopped")
+            || message.contains("stopped by user")
+            || message.contains("任务停止")
+        {
+            TaskStatus::Stopped
+        } else {
+            TaskStatus::Failed
+        };
+        let _ = storage::update_task_status(task_id, status, Some(message));
         self.hub.publish(TaskEvent::TaskResult {
             task_id: task_id.to_string(),
             success,

@@ -1,5 +1,6 @@
 pub mod api;
 pub mod auth;
+pub mod auth_phone;
 pub mod buy;
 pub mod config;
 pub mod core;

@@ -3,6 +3,7 @@ import { CheckCircle2, Clock3, Lock, QrCode, RefreshCw, ShieldAlert, Ticket, Use
 import {
   fetchShareAddresses,
   fetchShareBuyers,
+  fetchShareUserInfo,
   getPublicSharePreset,
   invoke,
   submitSharePreset,
@@ -13,7 +14,9 @@ import {
   getBuyerPhone,
   normalizeAddress,
 } from "./sharePayload";
+import { getBuyerPlaceholderText, getLoginBannerState } from "./shareLoginState";
 import { enableDocumentScroll } from "./documentScrollMode";
+import SharePhoneLoginPanel from "./SharePhoneLoginPanel";
 import logo from "../assets/logo.png";
 
 const statusClassMap = {
@@ -32,6 +35,13 @@ const statusLabelMap = {
   invalid: "链接不存在",
 };
 
+function normalizeCookies(cookieArray) {
+  if (!Array.isArray(cookieArray)) return [];
+  return cookieArray
+    .map((item) => String(item || "").split(";")[0].trim())
+    .filter(Boolean);
+}
+
 export default function ShareTaskPage({ token }) {
   const [preset, setPreset] = useState(null);
   const [pageStatus, setPageStatus] = useState("loading");
@@ -48,6 +58,10 @@ export default function ShareTaskPage({ token }) {
   const [showLoginModal, setShowLoginModal] = useState(false);
   const [qrCodeUrl, setQrCodeUrl] = useState("");
   const [loginStatus, setLoginStatus] = useState("");
+  const [loginMethod, setLoginMethod] = useState("qr");
+  const [buyerLoadState, setBuyerLoadState] = useState("idle");
+  const [buyerLoadMessage, setBuyerLoadMessage] = useState("");
+  const [currentLoginUser, setCurrentLoginUser] = useState(null);
 
   const requiredCount = preset?.locked_task?.count || 0;
 
@@ -74,6 +88,12 @@ export default function ShareTaskPage({ token }) {
   const selectedBuyers = buyers.filter((buyer) =>
     selectedBuyerIds.includes(String(buyer.id))
   );
+  const loginBanner = getLoginBannerState({
+    cookiesLength: cookies.length,
+    buyerLoadState,
+    buyerLoadMessage,
+    currentLoginUser,
+  });
 
   useEffect(() => {
     if (selectedAddress) {
@@ -100,38 +120,7 @@ export default function ShareTaskPage({ token }) {
       const result = await invoke("poll_login_status", { qrcodeKey: key });
       if (result.startsWith("[") || result.startsWith("{")) {
         const cookieArray = JSON.parse(result);
-        setCookies(cookieArray);
-        setLoginStatus("登录成功，正在拉取实名人与地址...");
-
-        const [buyerRes, addressRes] = await Promise.all([
-          fetchShareBuyers(token, cookieArray),
-          fetchShareAddresses(token, cookieArray),
-        ]);
-
-        if (buyerRes?.code === 0 && Array.isArray(buyerRes?.data?.list)) {
-          setBuyers(buyerRes.data.list);
-        } else if (buyerRes?.errno === 0 && Array.isArray(buyerRes?.data?.list)) {
-          setBuyers(buyerRes.data.list);
-        } else {
-          throw new Error("获取购票人失败，请确认账号下已有实名购票人");
-        }
-
-        if (addressRes?.code === 0 && Array.isArray(addressRes?.data?.addr_list)) {
-          const normalized = addressRes.data.addr_list.map(normalizeAddress);
-          setAddresses(normalized);
-          const defaultAddress = normalized.find((item) => item.is_default);
-          if (defaultAddress) {
-            setSelectedAddress(defaultAddress);
-          }
-        } else if (addressRes?.errno === 0 && Array.isArray(addressRes?.data?.addr_list)) {
-          const normalized = addressRes.data.addr_list.map(normalizeAddress);
-          setAddresses(normalized);
-          const defaultAddress = normalized.find((item) => item.is_default);
-          if (defaultAddress) {
-            setSelectedAddress(defaultAddress);
-          }
-        }
-
+        await hydrateShareLogin(cookieArray);
         setShowLoginModal(false);
       } else {
         setLoginStatus(result || "登录未完成，请重试");
@@ -139,6 +128,106 @@ export default function ShareTaskPage({ token }) {
     } catch (error) {
       setLoginStatus(`登录失败：${error.message || error}`);
     }
+  };
+
+  const hydrateShareLogin = async (cookieArray, loginUser = null) => {
+    const normalizedCookies = normalizeCookies(cookieArray);
+    setCookies(normalizedCookies);
+    setSelectedBuyerIds([]);
+    setBuyers([]);
+    setAddresses([]);
+    setSelectedAddress(null);
+    setCurrentLoginUser(null);
+    setBuyerLoadState("auth_verified");
+    setBuyerLoadMessage("");
+    setLoginStatus("正在校验账号信息...");
+
+    let resolvedLoginUser = loginUser;
+    if (!resolvedLoginUser) {
+      const userInfoRes = await fetchShareUserInfo(token, normalizedCookies);
+      if (userInfoRes?.code !== 0 || !userInfoRes?.data) {
+        setBuyerLoadState("buyers_error");
+        setBuyerLoadMessage(
+          userInfoRes?.message || userInfoRes?.msg || "登录已失效，请重新登录"
+        );
+        throw new Error(userInfoRes?.message || userInfoRes?.msg || "登录已失效，请重新登录");
+      }
+      resolvedLoginUser = {
+        mid:
+          userInfoRes.data.mid != null ? String(userInfoRes.data.mid) : "",
+        uname: userInfoRes.data.uname || "未知账号",
+        face: userInfoRes.data.face || null,
+      };
+    }
+
+    setCurrentLoginUser(resolvedLoginUser);
+    setBuyerLoadState("buyers_loading");
+    setLoginStatus("已校验账号，正在拉取实名人与地址...");
+
+    const [buyerResult, addressResult] = await Promise.allSettled([
+      fetchShareBuyers(token, normalizedCookies),
+      fetchShareAddresses(token, normalizedCookies),
+    ]);
+
+    const buyerRes = buyerResult.status === "fulfilled" ? buyerResult.value : null;
+    const buyerList =
+      buyerRes?.code === 0 && Array.isArray(buyerRes?.data?.list)
+        ? buyerRes.data.list
+        : buyerRes?.errno === 0 && Array.isArray(buyerRes?.data?.list)
+          ? buyerRes.data.list
+          : null;
+
+    if (!buyerList) {
+      const buyerError =
+        buyerResult.status === "rejected"
+          ? buyerResult.reason?.message || buyerResult.reason
+          : buyerRes?.message || buyerRes?.msg || "获取购票人失败，请确认账号下已有实名购票人";
+      setBuyerLoadState("buyers_error");
+      setBuyerLoadMessage(String(buyerError));
+      throw new Error(String(buyerError));
+    }
+
+    setBuyers(buyerList);
+
+    let statusMessage =
+      buyerList.length > 0
+        ? "登录成功，已加载实名购票人"
+        : `已登录账号：${resolvedLoginUser?.uname || "未知账号"}，但该账号下暂无实名购票人`;
+    const addressRes = addressResult.status === "fulfilled" ? addressResult.value : null;
+    const addressList =
+      addressRes?.code === 0 && Array.isArray(addressRes?.data?.addr_list)
+        ? addressRes.data.addr_list
+        : addressRes?.errno === 0 && Array.isArray(addressRes?.data?.addr_list)
+          ? addressRes.data.addr_list
+          : null;
+
+    if (addressList) {
+      const normalized = addressList.map(normalizeAddress);
+      setAddresses(normalized);
+      const defaultAddress = normalized.find((item) => item.is_default);
+      if (defaultAddress) {
+        setSelectedAddress(defaultAddress);
+      }
+      statusMessage =
+        buyerList.length > 0
+          ? "登录成功，已加载实名购票人与地址"
+          : `已登录账号：${resolvedLoginUser?.uname || "未知账号"}，但该账号下暂无实名购票人`;
+    } else if (addressResult.status === "rejected") {
+      statusMessage =
+        buyerList.length > 0
+          ? "登录成功，已加载实名购票人；地址加载失败，可稍后重试"
+          : `已登录账号：${resolvedLoginUser?.uname || "未知账号"}，但该账号下暂无实名购票人`;
+    }
+
+    setBuyerLoadState(buyerList.length > 0 ? "buyers_ready" : "buyers_empty");
+    setBuyerLoadMessage(statusMessage);
+    setLoginStatus(statusMessage);
+    return {
+      statusText: statusMessage,
+      buyerCount: buyerList.length,
+      addressCount: Array.isArray(addressList) ? addressList.length : 0,
+      userInfo: resolvedLoginUser,
+    };
   };
 
   const toggleBuyer = (buyer) => {
@@ -158,7 +247,7 @@ export default function ShareTaskPage({ token }) {
   const handleSubmit = async () => {
     if (!preset) return;
     if (cookies.length === 0) {
-      alert("请先扫码登录自己的 B 站账号");
+      alert("请先完成登录");
       return;
     }
     if (selectedBuyerIds.length !== requiredCount) {
@@ -273,22 +362,83 @@ export default function ShareTaskPage({ token }) {
                     <div key={index}>- {text}</div>
                   ))}
                 </div>
-                <button
-                  onClick={startLogin}
-                  disabled={pageStatus !== "active"}
-                  className={`w-full rounded-xl px-4 py-3 font-semibold flex items-center justify-center gap-2 ${
-                    pageStatus !== "active"
-                      ? "bg-gray-700 text-gray-400 cursor-not-allowed"
-                      : "bg-blue-600 hover:bg-blue-500 text-white"
-                  }`}
-                >
-                  <QrCode size={18} />
-                  {cookies.length > 0 ? "重新扫码登录" : "扫码登录自己的 B 站账号"}
-                </button>
+                <div className="flex rounded-xl border border-gray-800 bg-black/20 p-1">
+                  <button
+                    onClick={() => setLoginMethod("qr")}
+                    className={`flex-1 rounded-lg px-3 py-2 text-sm font-semibold ${
+                      loginMethod === "qr"
+                        ? "bg-blue-600 text-white"
+                        : "text-gray-300 hover:bg-gray-800"
+                    }`}
+                  >
+                    扫码登录
+                  </button>
+                  <button
+                    onClick={() => setLoginMethod("sms")}
+                    className={`flex-1 rounded-lg px-3 py-2 text-sm font-semibold ${
+                      loginMethod === "sms"
+                        ? "bg-blue-600 text-white"
+                        : "text-gray-300 hover:bg-gray-800"
+                    }`}
+                  >
+                    手机号验证码登录
+                  </button>
+                </div>
 
-                {cookies.length > 0 && (
-                  <div className="rounded-lg border border-green-500/30 bg-green-500/10 px-4 py-3 text-sm text-green-200">
-                    已登录成功，请继续选择实名购票人与联系人信息。
+                {loginMethod === "qr" ? (
+                  <button
+                    onClick={startLogin}
+                    disabled={pageStatus !== "active"}
+                    className={`w-full rounded-xl px-4 py-3 font-semibold flex items-center justify-center gap-2 ${
+                      pageStatus !== "active"
+                        ? "bg-gray-700 text-gray-400 cursor-not-allowed"
+                        : "bg-blue-600 hover:bg-blue-500 text-white"
+                    }`}
+                  >
+                    <QrCode size={18} />
+                    {cookies.length > 0 ? "重新扫码登录" : "扫码登录自己的 B 站账号"}
+                  </button>
+                ) : (
+                  <SharePhoneLoginPanel onLoginSuccess={hydrateShareLogin} />
+                )}
+
+                {loginBanner && (
+                  <div
+                    className={`rounded-lg px-4 py-3 text-sm ${
+                      loginBanner.tone === "success"
+                        ? "border border-green-500/30 bg-green-500/10 text-green-200"
+                        : loginBanner.tone === "warning"
+                          ? "border border-yellow-500/30 bg-yellow-500/10 text-yellow-200"
+                          : loginBanner.tone === "error"
+                            ? "border border-red-500/30 bg-red-500/10 text-red-200"
+                            : "border border-blue-500/30 bg-blue-500/10 text-blue-200"
+                    }`}
+                  >
+                    {loginBanner.text}
+                  </div>
+                )}
+
+                {currentLoginUser && (
+                  <div className="rounded-lg border border-gray-800 bg-black/20 px-4 py-3 flex items-center gap-3">
+                    {currentLoginUser.face ? (
+                      <img
+                        src={currentLoginUser.face}
+                        alt={currentLoginUser.uname}
+                        className="w-10 h-10 rounded-full border border-gray-700"
+                      />
+                    ) : (
+                      <div className="w-10 h-10 rounded-full border border-gray-700 bg-gray-800 flex items-center justify-center text-sm text-gray-300">
+                        {currentLoginUser.uname?.slice(0, 1) || "?"}
+                      </div>
+                    )}
+                    <div className="min-w-0">
+                      <div className="text-sm font-medium text-white truncate">
+                        {currentLoginUser.uname || "未知账号"}
+                      </div>
+                      <div className="text-xs text-gray-400">
+                        UID: {currentLoginUser.mid || "未知"}
+                      </div>
+                    </div>
                   </div>
                 )}
               </div>
@@ -308,7 +458,12 @@ export default function ShareTaskPage({ token }) {
                   <div className="rounded-xl border border-gray-800 bg-black/20 p-3 max-h-80 overflow-y-auto space-y-2">
                     {buyers.length === 0 && (
                       <div className="text-sm text-gray-500 text-center py-8">
-                        请先扫码登录后再加载实名购票人
+                        {getBuyerPlaceholderText({
+                          cookiesLength: cookies.length,
+                          buyerLoadState,
+                          buyerLoadMessage,
+                          currentLoginUser,
+                        })}
                       </div>
                     )}
                     {buyers.map((buyer) => {

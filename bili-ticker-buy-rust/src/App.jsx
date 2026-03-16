@@ -1,5 +1,14 @@
 import { useState, useEffect, useRef } from "react";
-import { clearAdminAuth, invoke, listSharePresets, startSharePresetTask } from "./platform/apiClient";
+import {
+    clearAdminAuth,
+    createTask,
+    deleteTaskRecord,
+    invoke,
+    listTasks,
+    stopTaskRecord,
+    startTaskRecord,
+    updateTaskRecord,
+} from "./platform/apiClient";
 import { listen } from "./platform/eventClient";
 import { isPermissionGranted, requestPermission, sendNotification } from "./platform/notificationClient";
 import { isTauriRuntime } from "./platform/runtime";
@@ -12,7 +21,6 @@ import {
     getBuyerPhone,
     normalizeAddress,
 } from "./share/sharePayload";
-import { mergeSubmittedShareTasks } from "./share/shareTaskSync.js";
 import {
     formatDateToLocalDateTime,
     normalizeDateTimeLocalValue,
@@ -126,6 +134,13 @@ function App({ onAdminLogout }) {
     };
 
     const syncedServerDate = getSyncedServerDate();
+
+    const upsertTask = (nextTask) => {
+        setTasks((prev) => {
+            const filtered = prev.filter((task) => task.id !== nextTask.id);
+            return [nextTask, ...filtered];
+        });
+    };
 
     const formatSaleStartText = (value) => {
         if (!value && value !== 0) return "";
@@ -316,20 +331,30 @@ function App({ onAdminLogout }) {
         await loadAccounts();
         await loadHistory();
         await loadProjectHistory(); // New
-        await syncSubmittedShareTasks();
+        if (isWebRuntime) {
+            await loadTasks();
+        }
         // 启动时只同步一次时间
         await syncTime(true);
     }
 
-    async function syncSubmittedShareTasks() {
+    useEffect(() => {
+        if (!isWebRuntime) return undefined;
+        const timer = setInterval(() => {
+            loadTasks();
+        }, 5000);
+        return () => clearInterval(timer);
+    }, [isWebRuntime]);
+
+    async function loadTasks() {
         if (!isWebRuntime) return;
         try {
-            const presets = await listSharePresets();
-            if (Array.isArray(presets)) {
-                setTasks((prev) => mergeSubmittedShareTasks(prev, presets));
+            const taskList = await listTasks();
+            if (Array.isArray(taskList)) {
+                setTasks(taskList);
             }
         } catch (error) {
-            console.error("Failed to sync submitted share tasks", error);
+            console.error("Failed to load tasks", error);
         }
     }
 
@@ -1110,6 +1135,17 @@ function App({ onAdminLogout }) {
         };
     }
 
+    function buildTaskCreatePayload() {
+        const args = prepareTaskPayload();
+        return {
+            ...args,
+            project: projectInfo?.name || projectId,
+            screen: selectedScreen?.name || "Default",
+            sku: selectedSku?.desc || "Default",
+            accountName: userInfo?.uname || "Unknown",
+        };
+    }
+
     async function startBuy() {
         try {
             setLogs([]);
@@ -1149,34 +1185,38 @@ function App({ onAdminLogout }) {
             setLogs(prev => [...prev, `正在启动任务，共 ${selectedBuyers.length} 个购票人...`]);
 
             try {
-                // Bundle all buyers into one task
-                const args = prepareTaskPayload(); // No args = use all selectedBuyers
-                args.timeOffset = parseFloat(currentOffset);
+                if (isWebRuntime) {
+                    const payload = buildTaskCreatePayload();
+                    payload.timeOffset = parseFloat(currentOffset);
+                    const createdTask = await createTask(payload);
+                    upsertTask(createdTask);
+                    setLogs(prev => [...prev, "任务已创建，正在启动..."]);
+                    setActiveTab("tasks");
+                    if (selectedBuyers.length > 1) {
+                        setViewMode("grid");
+                    }
 
-                setLogs(prev => [...prev, `请求参数: ${args.ticketInfo}`]);
-
-                let parsedTicket = null;
-                try {
-                    parsedTicket = JSON.parse(args.ticketInfo);
-                } catch (err) {
-                    console.warn("无法解析 ticketInfo", err);
+                    try {
+                        const startedTask = await startTaskRecord(createdTask.id);
+                        upsertTask(startedTask);
+                        setLogs(prev => [...prev, "✅ 任务已启动"]);
+                    } catch (err) {
+                        setLogs(prev => [...prev, `⚠️ 任务已创建，但启动失败: ${err.message || err}`]);
+                        alert(`任务已创建到列表，但启动失败: ${err.message || err}`);
+                    }
+                    return;
                 }
 
-                // Call backend
+                const args = prepareTaskPayload();
+                args.timeOffset = parseFloat(currentOffset);
                 const taskId = await invoke("start_buy", args);
-                console.debug("start_buy invoked", {
-                    taskId,
-                    contactTel: parsedTicket?.contact_tel,
-                    buyerInfo: parsedTicket?.buyer_info
-                });
-
                 const newTask = {
                     id: taskId,
                     project: projectInfo?.name || projectId,
                     screen: selectedScreen?.name || "Default",
                     sku: selectedSku?.desc || "Default",
                     buyerCount: selectedBuyers.length,
-                    buyers: selectedBuyers, // Store all buyers
+                    buyers: selectedBuyers,
                     startTime: timeStart || new Date().toLocaleTimeString(),
                     status: timeStart ? "scheduled" : "running",
                     logs: [syncLog],
@@ -1192,7 +1232,6 @@ function App({ onAdminLogout }) {
                 if (selectedBuyers.length > 1) {
                     setViewMode("grid");
                 }
-
             } catch (err) {
                 setLogs(prev => [...prev, `❌ 启动失败: ${err.message || err}`]);
                 alert(`启动失败: ${err.message || err}`);
@@ -1204,16 +1243,19 @@ function App({ onAdminLogout }) {
         }
     }
 
-    function saveTask() {
+    async function saveTask() {
         try {
             if (selectedBuyers.length === 0) {
                 alert("请至少选择一个购票人");
                 return;
             }
 
-            // Auto-start scheduled tasks
-            if (timeStart) {
-                startBuy();
+            if (isWebRuntime) {
+                saveProjectConfig();
+                const createdTask = await createTask(buildTaskCreatePayload());
+                upsertTask(createdTask);
+                setActiveTab("tasks");
+                alert(`已保存任务到任务列表`);
                 return;
             }
 
@@ -1247,27 +1289,21 @@ function App({ onAdminLogout }) {
 
     async function runPendingTask(task) {
         try {
-            let taskId = task.id;
-            let nextStatus = "running";
-
-            if (task.source === "share_submission" && task.sharePresetId) {
-                const result = await startSharePresetTask(task.sharePresetId, task.id);
-                taskId = result?.task_id || task.id;
-                nextStatus = result?.task_status || "running";
-            } else {
-                taskId = await invoke("start_buy", task.args);
-                nextStatus = task.args?.timeStart ? "scheduled" : "running";
+            if (isWebRuntime) {
+                const startedTask = await startTaskRecord(task.id);
+                upsertTask(startedTask);
+                return;
             }
 
+            const taskId = await invoke("start_buy", task.args);
             const runningTask = {
                 ...task,
                 id: taskId,
                 startTime: new Date().toLocaleTimeString(),
-                status: nextStatus,
-                lastLog: nextStatus === "scheduled" ? `Waiting for ${task.args?.timeStart || ""}` : "Starting...",
+                status: task.args?.timeStart ? "scheduled" : "running",
+                lastLog: task.args?.timeStart ? `Waiting for ${task.args?.timeStart || ""}` : "Starting...",
                 logs: []
             };
-
             setTasks(prev => prev.map(t => t.id === task.id ? runningTask : t));
         } catch (e) {
             alert("启动任务失败: " + e);
@@ -1276,6 +1312,12 @@ function App({ onAdminLogout }) {
 
     async function stopTask(taskId) {
         try {
+            if (isWebRuntime) {
+                const stoppedTask = await stopTaskRecord(taskId);
+                upsertTask(stoppedTask);
+                return;
+            }
+
             await invoke("stop_task", { taskId });
             setTasks(prev => prev.map(t => t.id === taskId ? { ...t, status: "stopped" } : t));
         } catch (e) {
@@ -1302,6 +1344,19 @@ function App({ onAdminLogout }) {
         const newTime = prompt("请输入新的开始时间 (格式: YYYY-MM-DD HH:mm:ss)", timeStart || "");
         if (!newTime) return;
 
+        if (isWebRuntime) {
+            const pendingTasks = tasks.filter(t => t.status === 'pending');
+            if (pendingTasks.length === 0) {
+                alert("没有待启动任务可修改时间");
+                return;
+            }
+            for (const task of pendingTasks) {
+                const updated = await updateTaskRecord(task.id, { timeStart: newTime });
+                upsertTask(updated);
+            }
+            return;
+        }
+
         setTasks(prev => prev.map(t => {
             if (t.status === 'pending') {
                 return {
@@ -1312,33 +1367,36 @@ function App({ onAdminLogout }) {
             }
             return t;
         }));
+    }
 
-        const scheduledTasks = tasks.filter(t => t.status === 'scheduled');
-        if (scheduledTasks.length > 0) {
-            if (confirm(`发现 ${scheduledTasks.length} 个正在倒计时的任务，是否也要更新它们的时间？(这将重启这些任务)`)) {
-                for (const task of scheduledTasks) {
-                    await stopTask(task.id);
-                    const newArgs = { ...task.args, timeStart: newTime };
-                    try {
-                        const newTaskId = await invoke("start_buy", newArgs);
-                        setTasks(prev => {
-                            const filtered = prev.filter(t => t.id !== task.id);
-                            const newTask = {
-                                ...task,
-                                id: newTaskId,
-                                startTime: newTime,
-                                status: "scheduled",
-                                logs: [],
-                                lastLog: `Rescheduled to ${newTime}`,
-                                args: newArgs
-                            };
-                            return [newTask, ...filtered];
-                        });
-                    } catch (e) {
-                        console.error("Failed to restart task", task.id, e);
-                    }
+    async function handleDeleteTask(task) {
+        try {
+            if (isWebRuntime) {
+                await deleteTaskRecord(task.id);
+            }
+            setTasks(prev => prev.filter(t => t.id !== task.id));
+        } catch (e) {
+            alert("删除任务失败: " + e);
+        }
+    }
+
+    async function handleClearCompletedTasks() {
+        const removableStatuses = new Set(['success', 'stopped', 'failed']);
+        const removableTasks = tasks.filter(task => removableStatuses.has(task.status));
+        if (removableTasks.length === 0) {
+            alert("没有可清理的已完成任务");
+            return;
+        }
+
+        try {
+            if (isWebRuntime) {
+                for (const task of removableTasks) {
+                    await deleteTaskRecord(task.id);
                 }
             }
+            setTasks(prev => prev.filter(task => !removableStatuses.has(task.status)));
+        } catch (e) {
+            alert("清理已完成任务失败: " + e);
         }
     }
 
@@ -1712,7 +1770,7 @@ function App({ onAdminLogout }) {
                             <div className={`flex items-center justify-between ${viewMode === "grid" ? "px-4 pt-4 mb-2" : "mb-6"}`}>
                                 <h3 className="text-xl font-bold flex items-center gap-2">
                                     <List className="text-blue-400" />
-                                    运行中的任务
+                                    任务列表
                                 </h3>
                                 <div className="flex items-center gap-3">
                                     <div className="flex gap-2 mr-2">
@@ -1744,7 +1802,7 @@ function App({ onAdminLogout }) {
                                             </div>
                                         </button>
                                     </div>
-                                    <button onClick={() => setTasks([])} className="text-sm text-gray-500 hover:text-white">
+                                    <button onClick={handleClearCompletedTasks} className="text-sm text-gray-500 hover:text-white">
                                         清空已完成任务
                                     </button>
                                 </div>
@@ -1762,6 +1820,7 @@ function App({ onAdminLogout }) {
                                             <div className="flex items-center justify-between w-full">
                                                 <div className="flex items-center gap-3 overflow-hidden">
                                                     <div className={`w-3 h-3 rounded-full flex-shrink-0 ${task.status === 'running' ? 'bg-green-500 animate-pulse' :
+                                                        task.status === 'scheduled' ? 'bg-blue-500 animate-pulse' :
                                                         task.status === 'success' ? 'bg-blue-500' :
                                                             task.status === 'pending' ? 'bg-yellow-500' :
                                                                 'bg-red-500'
@@ -1811,7 +1870,7 @@ function App({ onAdminLogout }) {
                                                     </button>
                                                 )}
                                                 <button
-                                                    onClick={() => setTasks(prev => prev.filter(t => t.id !== task.id))}
+                                                    onClick={() => handleDeleteTask(task)}
                                                     className="p-1.5 text-gray-500 hover:text-red-400"
                                                     title="删除任务"
                                                 >
@@ -1821,7 +1880,7 @@ function App({ onAdminLogout }) {
                                         </div>
                                         {viewMode === "list" && (
                                             <div className="text-xs text-gray-500 font-mono mt-1 ml-7">
-                                                {task.startTime}
+                                                {task.timeStart || task.startTime || "-"}
                                             </div>
                                         )}
 

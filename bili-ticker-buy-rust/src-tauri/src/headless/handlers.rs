@@ -1,5 +1,6 @@
 use crate::api;
 use crate::auth;
+use crate::auth_phone;
 use crate::buy::{self, TicketInfo};
 use crate::headless::auth as headless_auth;
 use crate::headless::ws::WsEventSink;
@@ -10,8 +11,10 @@ use crate::share::{
     validate_share_preset_batch_delete, LockedTaskConfig, ShareDisplaySnapshot,
     SharePresetRecord, SharePresetStatus, ShareSubmissionInput, ShareSubmissionSummary,
 };
-use crate::storage::{self, Account, ProjectConfig};
-use anyhow::anyhow;
+use crate::storage::{
+    self, Account, ProjectConfig, TaskArgs, TaskCreateInput, TaskRecord, TaskSource, TaskStatus,
+    TaskSummary,
+};
 use axum::extract::{Path, Query, State};
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
@@ -181,6 +184,8 @@ fn spawn_buy_task_with_id(
         .insert(task_id.clone(), stop_flag.clone());
 
     let task_id_clone = task_id.clone();
+    let task_id_for_cleanup = task_id.clone();
+    let runtime_tasks = state.tasks.clone();
     let sink = WsEventSink::new(state.ws_hub.clone());
     let task_status = if options.time_start.is_some() {
         "scheduled".to_string()
@@ -206,6 +211,7 @@ fn spawn_buy_task_with_id(
         {
             eprintln!("headless task error: {}", e);
         }
+        runtime_tasks.lock().unwrap().remove(&task_id_for_cleanup);
     });
 
     SpawnTaskResult {
@@ -267,6 +273,38 @@ pub async fn poll_login_status(Query(query): Query<PollQuery>) -> Response {
                 .into_response()
         }
         Err(e) => error_response(StatusCode::BAD_GATEWAY, e.to_string()).into_response(),
+    }
+}
+
+pub async fn get_sms_login_countries() -> Response {
+    match auth_phone::fetch_phone_countries().await {
+        Ok(result) => (StatusCode::OK, Json(result)).into_response(),
+        Err(e) => error_response(StatusCode::BAD_GATEWAY, e.to_string()).into_response(),
+    }
+}
+
+pub async fn get_sms_login_captcha() -> Response {
+    match auth_phone::fetch_sms_captcha().await {
+        Ok(result) => (StatusCode::OK, Json(result)).into_response(),
+        Err(e) => error_response(StatusCode::BAD_GATEWAY, e.to_string()).into_response(),
+    }
+}
+
+pub async fn send_sms_login_code(
+    Json(req): Json<auth_phone::SendSmsCodeRequest>,
+) -> Response {
+    match auth_phone::send_sms_code(req).await {
+        Ok(result) => (StatusCode::OK, Json(result)).into_response(),
+        Err(e) => error_response(StatusCode::BAD_REQUEST, e.to_string()).into_response(),
+    }
+}
+
+pub async fn verify_sms_login_code(
+    Json(req): Json<auth_phone::VerifySmsCodeRequest>,
+) -> Response {
+    match auth_phone::verify_sms_code(req).await {
+        Ok(result) => (StatusCode::OK, Json(result)).into_response(),
+        Err(e) => error_response(StatusCode::BAD_REQUEST, e.to_string()).into_response(),
     }
 }
 
@@ -419,6 +457,249 @@ pub async fn sync_time(Json(req): Json<SyncTimeRequest>) -> Response {
         })),
     )
         .into_response()
+}
+
+fn normalized_time_start(value: Option<String>) -> Option<String> {
+    value
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+}
+
+fn build_task_args(
+    info: TicketInfo,
+    interval: u64,
+    mode: u32,
+    total_attempts: u32,
+    time_start: Option<String>,
+    proxy: Option<String>,
+    time_offset: Option<f64>,
+    ntp_server: Option<String>,
+) -> TaskArgs {
+    TaskArgs {
+        ticket_info: info,
+        interval,
+        mode,
+        total_attempts,
+        time_start: normalized_time_start(time_start),
+        proxy,
+        time_offset,
+        ntp_server,
+    }
+}
+
+fn task_status_from_spawn(task_status: &str) -> TaskStatus {
+    match task_status {
+        "scheduled" => TaskStatus::Scheduled,
+        "running" => TaskStatus::Running,
+        "success" => TaskStatus::Success,
+        "failed" => TaskStatus::Failed,
+        "stopped" => TaskStatus::Stopped,
+        _ => TaskStatus::Pending,
+    }
+}
+
+fn spawn_options_from_task_args(args: &TaskArgs) -> SpawnTaskOptions {
+    SpawnTaskOptions {
+        interval: args.interval,
+        mode: args.mode,
+        total_attempts: args.total_attempts,
+        time_start: args.time_start.clone(),
+        proxy: args.proxy.clone(),
+        time_offset: args.time_offset,
+        ntp_server: args.ntp_server.clone(),
+    }
+}
+
+#[derive(Debug, Deserialize)]
+pub struct CreateTaskRequest {
+    #[serde(alias = "ticketInfo")]
+    pub ticket_info: String,
+    pub interval: u64,
+    pub mode: u32,
+    #[serde(alias = "totalAttempts")]
+    pub total_attempts: u32,
+    #[serde(alias = "timeStart")]
+    pub time_start: Option<String>,
+    pub proxy: Option<String>,
+    #[serde(alias = "timeOffset")]
+    pub time_offset: Option<f64>,
+    pub buyers: Option<Vec<Value>>,
+    #[serde(alias = "ntpServer")]
+    pub ntp_server: Option<String>,
+    pub project: Option<String>,
+    pub screen: Option<String>,
+    pub sku: Option<String>,
+    #[serde(alias = "accountName")]
+    pub account_name: Option<String>,
+}
+
+fn build_manual_task_record(req: CreateTaskRequest) -> anyhow::Result<TaskRecord> {
+    let mut info: TicketInfo = serde_json::from_str(&req.ticket_info)?;
+    merge_buyer_overrides(&mut info, req.buyers);
+    let now = current_unix_secs();
+    Ok(storage::build_task_record(TaskCreateInput {
+        id: Uuid::new_v4().to_string(),
+        source: TaskSource::Manual,
+        project: req
+            .project
+            .filter(|value| !value.trim().is_empty())
+            .or_else(|| info.project_name.clone())
+            .unwrap_or_else(|| info.project_id.clone()),
+        screen: req
+            .screen
+            .filter(|value| !value.trim().is_empty())
+            .unwrap_or_else(|| info.screen_id.clone()),
+        sku: req
+            .sku
+            .filter(|value| !value.trim().is_empty())
+            .unwrap_or_else(|| info.sku_id.clone()),
+        account_name: req
+            .account_name
+            .filter(|value| !value.trim().is_empty())
+            .unwrap_or_else(|| "Unknown".to_string()),
+        linked_share_preset_id: None,
+        args: build_task_args(
+            info,
+            req.interval,
+            req.mode,
+            req.total_attempts,
+            req.time_start,
+            req.proxy,
+            req.time_offset,
+            req.ntp_server,
+        ),
+        initial_status: TaskStatus::Pending,
+        created_at: now,
+        initial_log: Some("Ready to start".to_string()),
+    }))
+}
+
+pub async fn create_task(Json(req): Json<CreateTaskRequest>) -> Response {
+    let task = match build_manual_task_record(req) {
+        Ok(task) => task,
+        Err(e) => return error_response(StatusCode::BAD_REQUEST, e.to_string()).into_response(),
+    };
+
+    match storage::create_task(task) {
+        Ok(task) => (StatusCode::OK, Json(task.summary())).into_response(),
+        Err(e) => error_response(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
+    }
+}
+
+pub async fn list_tasks() -> Response {
+    match storage::get_tasks() {
+        Ok(tasks) => (
+            StatusCode::OK,
+            Json(tasks.into_iter().map(|task| task.summary()).collect::<Vec<TaskSummary>>()),
+        )
+            .into_response(),
+        Err(e) => error_response(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
+    }
+}
+
+#[derive(Debug, Deserialize)]
+pub struct UpdateTaskRequest {
+    #[serde(alias = "timeStart")]
+    pub time_start: Option<String>,
+}
+
+pub async fn update_task(Path(id): Path<String>, Json(req): Json<UpdateTaskRequest>) -> Response {
+    let task = match storage::get_tasks() {
+        Ok(tasks) => tasks.into_iter().find(|task| task.id == id),
+        Err(e) => return error_response(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
+    };
+
+    let Some(task) = task else {
+        return error_response(StatusCode::NOT_FOUND, "任务不存在").into_response();
+    };
+
+    if task.status != TaskStatus::Pending {
+        return error_response(StatusCode::BAD_REQUEST, "只有待启动任务允许修改时间").into_response();
+    }
+
+    match storage::update_task_time_start(&id, req.time_start) {
+        Ok(task) => (StatusCode::OK, Json(task.summary())).into_response(),
+        Err(e) => error_response(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
+    }
+}
+
+pub async fn delete_task(Path(id): Path<String>) -> Response {
+    let task = match storage::get_tasks() {
+        Ok(tasks) => tasks.into_iter().find(|task| task.id == id),
+        Err(e) => return error_response(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
+    };
+
+    let Some(task) = task else {
+        return error_response(StatusCode::NOT_FOUND, "任务不存在").into_response();
+    };
+
+    if matches!(task.status, TaskStatus::Running | TaskStatus::Scheduled) {
+        return error_response(StatusCode::BAD_REQUEST, "运行中的任务不能直接删除").into_response();
+    }
+
+    match storage::delete_task(&id) {
+        Ok(_) => (StatusCode::OK, Json(ApiOk { ok: true })).into_response(),
+        Err(e) => error_response(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
+    }
+}
+
+pub async fn start_task_record(
+    State(state): State<HeadlessState>,
+    Path(id): Path<String>,
+) -> Response {
+    let task = match storage::get_tasks() {
+        Ok(tasks) => tasks.into_iter().find(|task| task.id == id),
+        Err(e) => return error_response(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
+    };
+
+    let Some(task) = task else {
+        return error_response(StatusCode::NOT_FOUND, "任务不存在").into_response();
+    };
+
+    if task.status != TaskStatus::Pending {
+        return error_response(StatusCode::BAD_REQUEST, "只有待启动任务才能启动").into_response();
+    }
+
+    let spawned = spawn_buy_task_with_id(
+        &state,
+        task.id.clone(),
+        task.args.ticket_info.clone(),
+        spawn_options_from_task_args(&task.args),
+    );
+
+    match storage::update_task_after_start(&task.id, task_status_from_spawn(&spawned.task_status)) {
+        Ok(updated) => (StatusCode::OK, Json(updated.summary())).into_response(),
+        Err(e) => error_response(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
+    }
+}
+
+pub async fn stop_task_record(
+    State(state): State<HeadlessState>,
+    Path(id): Path<String>,
+) -> Response {
+    let task = match storage::get_tasks() {
+        Ok(tasks) => tasks.into_iter().find(|task| task.id == id),
+        Err(e) => return error_response(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
+    };
+
+    let Some(task) = task else {
+        return error_response(StatusCode::NOT_FOUND, "任务不存在").into_response();
+    };
+
+    if let Some(flag) = state.tasks.lock().unwrap().get(&id) {
+        flag.store(true, Ordering::Relaxed);
+    }
+
+    let message = if matches!(task.status, TaskStatus::Running | TaskStatus::Scheduled) {
+        Some("任务停止中，请稍候…")
+    } else {
+        Some("任务已停止")
+    };
+
+    match storage::update_task_status(&id, TaskStatus::Stopped, message) {
+        Ok(updated) => (StatusCode::OK, Json(updated.summary())).into_response(),
+        Err(e) => error_response(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -836,6 +1117,31 @@ pub async fn fetch_share_addresses(
     }
 }
 
+pub async fn fetch_share_user_info(
+    Path(token): Path<String>,
+    Json(req): Json<AddressRequest>,
+) -> Response {
+    let preset = match storage::with_share_presets_mut(|presets| {
+        normalize_share_presets(presets);
+        Ok(find_share_preset_index_by_token(presets, &token).map(|idx| presets[idx].clone()))
+    }) {
+        Ok(Some(preset)) => preset,
+        Ok(None) => return error_response(StatusCode::NOT_FOUND, "分享链接不存在").into_response(),
+        Err(e) => {
+            return error_response(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response()
+        }
+    };
+
+    if let Err(response) = active_share_preset_or_response(&preset, current_unix_secs()) {
+        return response;
+    }
+
+    match api::fetch_user_info(req.cookies).await {
+        Ok(v) => (StatusCode::OK, Json(v)).into_response(),
+        Err(e) => error_response(StatusCode::BAD_GATEWAY, e.to_string()).into_response(),
+    }
+}
+
 #[derive(Debug, Serialize)]
 pub struct SubmitSharePresetResponse {
     pub task_id: String,
@@ -886,7 +1192,6 @@ pub async fn submit_share_preset(
         Err(e) => return error_response(StatusCode::BAD_REQUEST, e.to_string()).into_response(),
     };
     let export_config = build_share_submission_export_config(info.clone(), &preset.locked_task);
-    let pending_task_id = Uuid::new_v4().to_string();
 
     let submitter_uid = user_info["data"]["mid"]
         .as_str()
@@ -897,6 +1202,34 @@ pub async fn submit_share_preset(
         .as_str()
         .unwrap_or("未知用户")
         .to_string();
+
+    let pending_task_id = Uuid::new_v4().to_string();
+    let task = storage::build_task_record(TaskCreateInput {
+        id: pending_task_id.clone(),
+        source: TaskSource::ShareSubmission,
+        project: preset.locked_task.project_name.clone(),
+        screen: preset.locked_task.screen_name.clone(),
+        sku: preset.locked_task.sku_name.clone(),
+        account_name: submitter_name.clone(),
+        linked_share_preset_id: Some(preset.id.clone()),
+        args: build_task_args(
+            info.clone(),
+            preset.locked_task.interval,
+            preset.locked_task.mode,
+            preset.locked_task.total_attempts,
+            preset.locked_task.time_start.clone(),
+            preset.locked_task.proxy.clone(),
+            None,
+            preset.locked_task.ntp_server.clone(),
+        ),
+        initial_status: TaskStatus::Pending,
+        created_at: current_unix_secs(),
+        initial_log: Some(format!("分享链接提交：{}", submitter_name)),
+    });
+
+    if let Err(e) = storage::create_task(task) {
+        return error_response(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response();
+    }
 
     let preset_mut = &mut presets[preset_idx];
     preset_mut.success_submission_count += 1;
@@ -931,70 +1264,51 @@ pub async fn start_share_preset_task(
     Path(id): Path<String>,
     Json(req): Json<StartSharePresetTaskRequest>,
 ) -> Response {
-    let _share_guard = share_submit_lock().lock().await;
-    let now = current_unix_secs();
+    let task = match storage::get_tasks() {
+        Ok(tasks) => tasks.into_iter().find(|task| {
+            task.linked_share_preset_id.as_deref() == Some(id.as_str())
+                && req
+                    .task_id
+                    .as_ref()
+                    .map(|task_id| task.id == *task_id)
+                    .unwrap_or(true)
+        }),
+        Err(e) => return error_response(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
+    };
 
-    let result = storage::with_share_presets_mut(|presets| {
-        normalize_share_presets(presets);
-        let preset = presets
-            .iter_mut()
-            .find(|preset| preset.id == id)
-            .ok_or_else(|| anyhow::anyhow!("分享链接不存在"))?;
+    let Some(task) = task else {
+        return error_response(StatusCode::NOT_FOUND, "该分享记录没有可启动的任务").into_response();
+    };
 
-        let last_submission = preset
-            .last_submission
-            .as_mut()
-            .ok_or_else(|| anyhow::anyhow!("该分享链接还没有提交记录"))?;
+    if task.status != TaskStatus::Pending {
+        return error_response(
+            StatusCode::BAD_REQUEST,
+            format!("该分享任务当前状态为 {:?}，不能重复启动", task.status),
+        )
+        .into_response();
+    }
 
-        if last_submission.task_status != "pending" {
-            return Err(anyhow!(
-                "该分享任务当前状态为 {}，不能重复启动",
-                last_submission.task_status
-            ));
-        }
+    let spawned = spawn_buy_task_with_id(
+        &state,
+        task.id.clone(),
+        task.args.ticket_info.clone(),
+        spawn_options_from_task_args(&task.args),
+    );
 
-        let export = preset
-            .last_submission_export
-            .clone()
-            .ok_or_else(|| anyhow::anyhow!("该分享记录没有可启动的配置"))?;
-
-        let task_id = req
-            .task_id
-            .clone()
-            .unwrap_or_else(|| last_submission.task_id.clone());
-
-        let spawned = spawn_buy_task_with_id(
-            &state,
-            task_id.clone(),
-            export.ticket_info.clone(),
-            SpawnTaskOptions {
-                interval: export.interval,
-                mode: export.mode,
-                total_attempts: export.total_attempts,
-                time_start: export
-                    .time_start
-                    .clone()
-                    .filter(|value| !value.trim().is_empty()),
-                proxy: export.proxy.clone(),
-                time_offset: export.time_offset,
-                ntp_server: export.ntp_server.clone(),
-            },
-        );
-
-        last_submission.task_id = task_id;
-        last_submission.task_status = spawned.task_status.clone();
-        last_submission.submitted_at = now;
-
-        Ok(spawned)
-    });
-
-    match result {
-        Ok(spawned) => (
+    match storage::update_task_after_start(&task.id, task_status_from_spawn(&spawned.task_status)) {
+        Ok(updated) => (
             StatusCode::OK,
             Json(SubmitSharePresetResponse {
-                task_id: spawned.task_id,
-                task_status: spawned.task_status.clone(),
-                message: if spawned.task_status == "scheduled" {
+                task_id: updated.id,
+                task_status: match updated.status {
+                    TaskStatus::Scheduled => "scheduled".to_string(),
+                    TaskStatus::Running => "running".to_string(),
+                    TaskStatus::Pending => "pending".to_string(),
+                    TaskStatus::Success => "success".to_string(),
+                    TaskStatus::Stopped => "stopped".to_string(),
+                    TaskStatus::Failed => "failed".to_string(),
+                },
+                message: if updated.status == TaskStatus::Scheduled {
                     "分享任务已启动，等待开抢时间".to_string()
                 } else {
                     "分享任务已启动".to_string()
@@ -1002,9 +1316,6 @@ pub async fn start_share_preset_task(
             }),
         )
             .into_response(),
-        Err(e) if e.to_string().contains("不存在") => {
-            error_response(StatusCode::NOT_FOUND, e.to_string()).into_response()
-        }
-        Err(e) => error_response(StatusCode::BAD_REQUEST, e.to_string()).into_response(),
+        Err(e) => error_response(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
     }
 }
