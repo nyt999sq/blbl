@@ -1,15 +1,15 @@
 [
   {
-    "id": "15554749-067e-4204-b356-348f418509a4",
-    "token_hash": "dce4cb0e7fdae27bceb5e1ac3b3bc2f9",
-    "status": "closed",
-    "created_at": 1773283058,
-    "expires_at": 1773369458,
+    "id": "33a87de8-b463-492a-97dc-142b2e35ae02",
+    "token_hash": "59798c6d9495e21ffe762ac63aa1e2de",
+    "status": "completed",
+    "created_at": 1773897284,
+    "expires_at": 1773983684,
     "creator_uid": null,
     "creator_name": null,
     "title": null,
     "max_success_submissions": 1,
-    "success_submission_count": 0,
+    "success_submission_count": 1,
     "locked_task": {
       "project_id": "113573",
       "project_name": "济南·幻樱动漫游戏嘉年华-22",
@@ -43,52 +43,105 @@
         "请确保已在 B 站会员购中维护好实名购票人和收货地址"
       ]
     },
-    "last_submission": null
-  },
-  {
-    "id": "651ac7aa-c8bd-4fb7-8647-8f52f23be57f",
-    "token_hash": "d07c832a052772d818f731acabaaab89",
-    "status": "closed",
-    "created_at": 1773282954,
-    "expires_at": 1773369354,
-    "creator_uid": null,
-    "creator_name": null,
-    "title": null,
-    "max_success_submissions": 1,
-    "success_submission_count": 0,
-    "locked_task": {
-      "project_id": "113573",
-      "project_name": "济南·幻樱动漫游戏嘉年华-22",
-      "screen_id": "325363",
-      "screen_name": "5月1日",
-      "sku_id": "834811",
-      "sku_name": "预售票",
-      "count": 1,
-      "pay_money": 7200,
-      "is_hot_project": false,
-      "time_start": "2026-02-22 18:00:00",
+    "last_submission": {
+      "submitted_at": 1773897346,
+      "submitter_uid": "3546826194028915",
+      "submitter_name": "沈love宁",
+      "task_id": "fff58fd4-6b98-4e98-9470-b799782bf387",
+      "task_status": "success",
+      "buyer_count": 1
+    },
+    "last_submission_export": {
+      "version": 1,
+      "source": "share_submission",
+      "ticket_info": {
+        "project_id": "113573",
+        "project_name": "济南·幻樱动漫游戏嘉年华-22",
+        "screen_id": "325363",
+        "sku_id": "834811",
+        "count": 1,
+        "buyer_info": [
+          {
+            "accountId": 3546826194028915,
+            "account_channel": "",
+            "contact_name": "沈宁",
+            "contact_tel": "19971724601",
+            "deliver_info": {
+              "accountId": 3546826194028915,
+              "account_channel": "",
+              "addr": "广场街办事处交通大道272号湖北工程学院",
+              "area": "孝南区",
+              "area_id": 420902,
+              "city": "孝感市",
+              "city_id": 420900,
+              "contact_tel": "19971724601",
+              "def": 1,
+              "id": 31159846,
+              "name": "沈宁",
+              "phone": "19971724601",
+              "prov": "湖北省",
+              "prov_id": 420000,
+              "status": 0,
+              "tel": "19971724601",
+              "uid": 3546826194028915,
+              "zip_code": ""
+            },
+            "error_code": "0",
+            "id": 11306669,
+            "id_card_back": "//i2.hdslb.com/bfs/ticket-sales/202512/android_1764637092350.jpg3546826194028915.png",
+            "id_card_front": "//i0.hdslb.com/bfs/ticket-sales/202512/android_1764637082458.jpg3546826194028915.png",
+            "id_type": 0,
+            "is_default": 1,
+            "mobile": "19971724601",
+            "name": "宁远涛",
+            "personal_id": "420************815",
+            "phone": "19971724601",
+            "tel": "19971724601",
+            "uid": 3546826194028915,
+            "verify_status": 1
+          }
+        ],
+        "deliver_info": {
+          "accountId": 3546826194028915,
+          "account_channel": "",
+          "addr": "广场街办事处交通大道272号湖北工程学院",
+          "area": "孝南区",
+          "area_id": 420902,
+          "city": "孝感市",
+          "city_id": 420900,
+          "contact_tel": "19971724601",
+          "def": 1,
+          "id": 31159846,
+          "name": "沈宁",
+          "phone": "19971724601",
+          "prov": "湖北省",
+          "prov_id": 420000,
+          "status": 0,
+          "tel": "19971724601",
+          "uid": 3546826194028915,
+          "zip_code": ""
+        },
+        "cookies": [
+          "SESSDATA=8018b5c3%2C1789449321%2Cc50aa%2A31CjBvXVYeMRweuTr-MPYqDMGr7zT7PL33Ixu1cYbwZxKzHSxAB4Xq2f9wqHCA6kYYtYQSVmpSZFYxaERwZWkxUXNkS0k1V0dzOVhrWExrT0RDdlJGeVdRYWJUX2Qxd19nd3Z2WGVtOWoxblZhT3RLaXFjVEE5SkQwQWw4T2tldmlkTklyOWpTbm5BIIEC",
+          "sid=4szepdb9",
+          "b_nut=1773897321",
+          "DedeUserID__ckMd5=5391442ef006c9db",
+          "buvid3=78F1254D-F77E-05E9-5AB8-B41292495E0121687infoc",
+          "DedeUserID=3546826194028915",
+          "bili_jct=7a93465fa9244aba939032ce33008169"
+        ],
+        "is_hot_project": false,
+        "pay_money": 7200,
+        "contact_name": "沈宁",
+        "contact_tel": "19971724601"
+      },
       "interval": 1000,
       "mode": 0,
       "total_attempts": 10,
+      "time_start": "2026-02-22 18:00:00",
       "proxy": null,
+      "time_offset": null,
       "ntp_server": "https://api.bilibili.com/x/report/click/now"
-    },
-    "display_snapshot": {
-      "venue_name": null,
-      "sale_start_text": "2026-02-22 18:00:00",
-      "ticket_desc": "5月1日 - 预售票",
-      "price_text": "￥72.00",
-      "locked_fields_text": [
-        "项目、场次、票档已由发起人锁定",
-        "抢票时间与重试策略已由系统预设",
-        "你只能填写自己的实名购票信息与登录授权"
-      ],
-      "tips": [
-        "请使用你自己的 B 站账号扫码登录",
-        "提交成功后链接将自动失效",
-        "请确保已在 B 站会员购中维护好实名购票人和收货地址"
-      ]
-    },
-    "last_submission": null
+    }
   }
 ]

@@ -30,7 +30,6 @@ function formatTime(ts) {
 }
 
 export default function SharePresetPanel({
-  enabled,
   lockedTask,
   displaySnapshot,
   creatorName,
@@ -48,7 +47,6 @@ export default function SharePresetPanel({
   const deletableStatuses = new Set(["completed", "expired", "closed"]);
 
   const loadPresets = async () => {
-    if (!enabled) return;
     try {
       const result = await listSharePresets();
       const nextPresets = Array.isArray(result) ? result : [];
@@ -63,13 +61,9 @@ export default function SharePresetPanel({
 
   useEffect(() => {
     loadPresets();
-  }, [enabled]);
+  }, []);
 
   const handleCreate = async () => {
-    if (!enabled) {
-      alert("分享链接仅支持 headless Web 模式");
-      return;
-    }
     if (!lockedTask || !displaySnapshot) {
       alert("请先选择项目、场次和票档");
       return;
@@ -171,7 +165,7 @@ export default function SharePresetPanel({
   };
 
   return (
-    <div className="mt-6 rounded-xl border border-gray-700 bg-gray-900/60 p-5 space-y-5">
+    <div className="mt-6 rounded-xl border-2 border-cyan-500/30 bg-gradient-to-br from-gray-900/80 to-cyan-950/20 p-5 space-y-5">
       <div className="flex items-center justify-between gap-4">
         <div>
           <h4 className="text-lg font-bold flex items-center gap-2">
@@ -190,12 +184,6 @@ export default function SharePresetPanel({
           刷新
         </button>
       </div>
-
-      {!enabled && (
-        <div className="rounded-lg border border-yellow-500/30 bg-yellow-500/10 px-4 py-3 text-sm text-yellow-200">
-          当前为桌面 Tauri 运行时，无法生成可对外访问的 headless Web 分享链接。
-        </div>
-      )}
 
       <div className="grid grid-cols-1 lg:grid-cols-3 gap-4">
         <div className="rounded-lg border border-gray-800 bg-black/20 p-4 space-y-3">
@@ -264,14 +252,14 @@ export default function SharePresetPanel({
           </div>
           <button
             onClick={handleCreate}
-            disabled={!enabled || !lockedTask || loading}
-            className={`w-full px-4 py-2 rounded-lg font-semibold text-sm ${
-              !enabled || !lockedTask || loading
+            disabled={!lockedTask || loading}
+            className={`w-full px-4 py-3 rounded-lg font-bold text-sm shadow-lg transform transition active:scale-95 ${
+              !lockedTask || loading
                 ? "bg-gray-700 text-gray-400 cursor-not-allowed"
-                : "bg-cyan-600 hover:bg-cyan-500 text-white"
+                : "bg-gradient-to-r from-cyan-600 to-blue-600 hover:from-cyan-500 hover:to-blue-500 text-white"
             }`}
           >
-            {loading ? "生成中..." : "生成分享链接"}
+            {loading ? "生成中..." : "🔗 生成分享链接"}  
           </button>
         </div>
       </div>

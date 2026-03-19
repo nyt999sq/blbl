@@ -1,5 +1,6 @@
 use crate::api; // Import api module
 use crate::core::events::TaskEventSink;
+use crate::order_protocol::{OrderProtocol, SubmitOrderResult};
 use crate::storage::{self, HistoryItem};
 use crate::util::CTokenGenerator;
 use anyhow::Result;
@@ -8,7 +9,6 @@ use log::info;
 use reqwest::cookie::Jar;
 use reqwest::{Client, Url};
 use serde::{Deserialize, Serialize};
-use serde_json::json;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -195,18 +195,9 @@ pub async fn start_buy_task(
         rand::random::<u64>() % 8000 + 2000,
     );
 
-    let mut token_payload = json!({
-        "count": info.count,
-        "screen_id": info.screen_id,
-        "order_type": 1,
-        "project_id": info.project_id,
-        "sku_id": info.sku_id,
-        "token": "",
-        "newRisk": true,
-    });
-
     let mut left_time = total_attempts as i32;
     let mut is_running = true;
+    let protocol = OrderProtocol::new();
 
     // Generate static device ID for this task
     let device_id = format!(
@@ -221,269 +212,92 @@ pub async fn start_buy_task(
         }
 
         emit_log(sink.as_ref(), &task_id, "1) Preparing order...");
-
         if is_hot {
-            token_payload["token"] = json!(ctoken_gen.generate_ctoken(false));
+            emit_log(sink.as_ref(), &task_id, "Hot project enabled, ctoken/ptoken flow active.");
         }
+        emit_log(sink.as_ref(), &task_id, "2) Confirming order...");
+        emit_log(sink.as_ref(), &task_id, "3) Creating order...");
 
-        let prepare_url = format!(
-            "https://show.bilibili.com/api/ticket/order/prepare?project_id={}",
-            info.project_id
-        );
-        let res = client
-            .post(&prepare_url)
-            .json(&token_payload)
-            .send()
-            .await?;
-
-        let res_json: serde_json::Value = res.json().await?;
-        emit_log(
-            sink.as_ref(),
-            &task_id,
-            &format!("Prepare result: {:?}", res_json),
-        );
-
-        if res_json["errno"].as_i64().unwrap_or(-1) != 0
-            && res_json["code"].as_i64().unwrap_or(-1) != 0
+        let start = Instant::now();
+        match protocol
+            .submit_order(
+                &client,
+                &info,
+                &mut ctoken_gen,
+                &device_id,
+                stop_flag.as_ref(),
+            )
+            .await
         {
-            emit_log(
-                sink.as_ref(),
-                &task_id,
-                &format!("Prepare failed: {:?}", res_json),
-            );
-            sleep(Duration::from_millis(interval)).await;
-            continue;
-        }
+            Ok(SubmitOrderResult::Success {
+                order_id,
+                payment_url,
+            }) => {
+                emit_log(sink.as_ref(), &task_id, "Order created successfully!");
+                emit_log(sink.as_ref(), &task_id, &format!("Order ID: {}", order_id));
 
-        let token = res_json["data"]["token"].as_str().unwrap_or("").to_string();
-        let ptoken = res_json["data"]["ptoken"]
-            .as_str()
-            .unwrap_or("")
-            .to_string();
+                let pay_url = payment_url.unwrap_or_default();
+                if pay_url.is_empty() {
+                    emit_log(
+                        sink.as_ref(),
+                        &task_id,
+                        "Payment URL missing, order created but QR code unavailable.",
+                    );
+                } else {
+                    sink.emit_payment_qrcode(&task_id, &pay_url);
+                }
 
-        emit_log(sink.as_ref(), &task_id, "2) Creating order...");
+                let history_item = HistoryItem {
+                    order_id: order_id.clone(),
+                    project_name: info
+                        .project_name
+                        .clone()
+                        .unwrap_or(info.project_id.clone()),
+                    price: info.pay_money.unwrap_or(0),
+                    time: Local::now().format("%Y-%m-%d %H:%M:%S").to_string(),
+                    pay_url,
+                };
+                let _ = storage::add_history_item(history_item);
 
-        // Prepare create payload
-        let now_ms = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)?
-            .as_millis() as u64;
-        let click_origin = now_ms - rand::random::<u64>() % 2000 - 1000; // 1-3 seconds ago
-
-        let mut create_payload = json!({
-            "project_id": info.project_id,
-            "screen_id": info.screen_id,
-            "sku_id": info.sku_id,
-            "count": info.count,
-            "order_type": 1,
-            "buyer_info": info.buyer_info.to_string(),
-            "deliver_info": info.deliver_info.to_string(),
-            "token": token,
-            "again": 1,
-            "timestamp": now_ms,
-            "deviceId": device_id,
-            "requestSource": "neul-next",
-            "newRisk": true,
-            "clickPosition": {
-                "x": rand::random::<u64>() % 500 + 100,
-                "y": rand::random::<u64>() % 1000 + 500,
-                "origin": click_origin,
-                "now": now_ms
+                sink.emit_task_result(&task_id, true, &format!("抢票成功！订单号: {}", order_id));
+                is_running = false;
             }
-        });
-
-        if let Some(pay_money) = info.pay_money {
-            create_payload["pay_money"] = json!(pay_money);
-        }
-
-        // Add contact info
-        if let Some(name) = &info.contact_name {
-            create_payload["contact_name"] = json!(name);
-            create_payload["buyer"] = json!(name);
-        }
-        if let Some(tel) = &info.contact_tel {
-            if !tel.contains('*') {
-                create_payload["contact_tel"] = json!(tel);
-                create_payload["tel"] = json!(tel);
+            Ok(SubmitOrderResult::PriceChanged { pay_money }) => {
+                emit_log(
+                    sink.as_ref(),
+                    &task_id,
+                    &format!("Price updated to: {}", pay_money),
+                );
+                info.pay_money = Some(pay_money);
             }
-        }
-
-        // Debug log for payload details
-        emit_log(
-            sink.as_ref(),
-            &task_id,
-            &format!(
-                "Payload - Count: {}, Buyers: {}",
-                create_payload["count"], create_payload["buyer_info"]
-            ),
-        );
-        emit_log(
-            sink.as_ref(),
-            &task_id,
-            &format!(
-                "Contact Info - Name: {:?}, Tel: {:?}",
-                create_payload.get("contact_name"),
-                create_payload.get("contact_tel")
-            ),
-        );
-
-        let mut success = false;
-
-        for attempt in 1..=60 {
-            if !is_running {
-                break;
+            Ok(SubmitOrderResult::TokenExpired) => {
+                emit_log(
+                    sink.as_ref(),
+                    &task_id,
+                    "Token expired. Restarting prepare flow...",
+                );
             }
-            if stop_flag.load(Ordering::Relaxed) {
+            Ok(SubmitOrderResult::RetryableFailure { code, message }) => {
+                emit_log(
+                    sink.as_ref(),
+                    &task_id,
+                    &format!("Order flow failed: code={} msg={}", code, message),
+                );
+            }
+            Ok(SubmitOrderResult::Stopped) => {
                 emit_log(sink.as_ref(), &task_id, "Task stopped by user.");
                 is_running = false;
-                break;
             }
-
-            let mut create_url = format!(
-                "https://show.bilibili.com/api/ticket/order/createV2?project_id={}",
-                info.project_id
-            );
-
-            if is_hot {
-                create_payload["ctoken"] = json!(ctoken_gen.generate_ctoken(true));
-                create_payload["ptoken"] = json!(ptoken);
-                create_payload["orderCreateUrl"] =
-                    json!("https://show.bilibili.com/api/ticket/order/createV2");
-                create_url.push_str(&format!("&ptoken={}", ptoken));
-            }
-
-            let start = Instant::now();
-            let res = client.post(&create_url).json(&create_payload).send().await;
-
-            match res {
-                Ok(r) => {
-                    let r_json: serde_json::Value = r.json().await.unwrap_or(json!({}));
-                    let errno = r_json["errno"]
-                        .as_i64()
-                        .or(r_json["code"].as_i64())
-                        .unwrap_or(-1);
-
-                    emit_log(
-                        sink.as_ref(),
-                        &task_id,
-                        &format!(
-                            "[Attempt {}/60] Code: {} | Msg: {}",
-                            attempt, errno, r_json["msg"]
-                        ),
-                    );
-
-                    if errno == 0 || errno == 100048 || errno == 100079 {
-                        emit_log(sink.as_ref(), &task_id, "Order created successfully!");
-                        success = true;
-
-                        if errno == 0 {
-                            let order_id = if let Some(s) = r_json["data"]["orderId"].as_str() {
-                                s.to_string()
-                            } else if let Some(n) = r_json["data"]["orderId"].as_i64() {
-                                n.to_string()
-                            } else {
-                                "".to_string()
-                            };
-
-                            emit_log(sink.as_ref(), &task_id, &format!("Order ID: {}", order_id));
-
-                            if !order_id.is_empty() {
-                                let mut pay_url_str = "".to_string();
-                                let pay_url_api = format!("https://show.bilibili.com/api/ticket/order/getPayParam?order_id={}", order_id);
-
-                                if let Ok(pay_res) = client.get(&pay_url_api).send().await {
-                                    if let Ok(pay_json) = pay_res.json::<serde_json::Value>().await
-                                    {
-                                        if let Some(code_url) =
-                                            pay_json["data"]["code_url"].as_str()
-                                        {
-                                            pay_url_str = code_url.to_string();
-                                            sink.emit_payment_qrcode(&task_id, code_url);
-                                        } else {
-                                            emit_log(
-                                                sink.as_ref(),
-                                                &task_id,
-                                                &format!(
-                                                    "Failed to get payment URL: {:?}",
-                                                    pay_json
-                                                ),
-                                            );
-                                        }
-                                    }
-                                }
-
-                                // Save to history regardless of payment URL
-                                let history_item = HistoryItem {
-                                    order_id: order_id.to_string(),
-                                    project_name: info
-                                        .project_name
-                                        .clone()
-                                        .unwrap_or(info.project_id.clone()),
-                                    price: info.pay_money.unwrap_or(0),
-                                    time: Local::now().format("%Y-%m-%d %H:%M:%S").to_string(),
-                                    pay_url: pay_url_str,
-                                };
-                                let _ = storage::add_history_item(history_item);
-                            } else {
-                                emit_log(
-                                    sink.as_ref(),
-                                    &task_id,
-                                    &format!("Failed to extract Order ID from: {:?}", r_json),
-                                );
-                            }
-                        }
-
-                        sink.emit_task_result(
-                            &task_id,
-                            true,
-                            &format!("抢票成功！订单号: {}", r_json["data"]["orderId"]),
-                        );
-                        break;
-                    }
-
-                    if errno == 100034 {
-                        // Price changed
-                        if let Some(new_price) = r_json["data"]["pay_money"].as_u64() {
-                            emit_log(
-                                sink.as_ref(),
-                                &task_id,
-                                &format!("Price updated to: {}", new_price),
-                            );
-                            info.pay_money = Some(new_price as u32);
-                            create_payload["pay_money"] = json!(new_price);
-                        }
-                    }
-
-                    if errno == 100051 {
-                        // Token expired
-                        break;
-                    }
-                }
-                Err(e) => {
-                    emit_log(
-                        sink.as_ref(),
-                        &task_id,
-                        &format!("[Attempt {}/60] Request error: {}", attempt, e),
-                    );
-                }
-            }
-
-            // Precise sleep
-            let elapsed = start.elapsed();
-            let interval_duration = Duration::from_millis(interval);
-            if elapsed < interval_duration {
-                let remaining = interval_duration - elapsed;
-                if remaining.as_secs_f64() > 0.02 {
-                    sleep(remaining - Duration::from_millis(10)).await;
-                }
-                while start.elapsed() < interval_duration {
-                    std::hint::spin_loop();
-                }
+            Err(err) => {
+                emit_log(
+                    sink.as_ref(),
+                    &task_id,
+                    &format!("Order flow request error: {}", err),
+                );
             }
         }
 
-        if success {
-            is_running = false;
-        } else {
+        if is_running {
             emit_log(
                 sink.as_ref(),
                 &task_id,
@@ -495,6 +309,20 @@ pub async fn start_buy_task(
                     is_running = false;
                     emit_log(sink.as_ref(), &task_id, "Total attempts reached. Stopping.");
                     sink.emit_task_result(&task_id, false, "达到最大尝试次数，任务停止");
+                }
+            }
+        }
+
+        if is_running {
+            let elapsed = start.elapsed();
+            let interval_duration = Duration::from_millis(interval);
+            if elapsed < interval_duration {
+                let remaining = interval_duration - elapsed;
+                if remaining.as_secs_f64() > 0.02 {
+                    sleep(remaining - Duration::from_millis(10)).await;
+                }
+                while start.elapsed() < interval_duration {
+                    std::hint::spin_loop();
                 }
             }
         }

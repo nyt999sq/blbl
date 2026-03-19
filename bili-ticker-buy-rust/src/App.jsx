@@ -1,7 +1,6 @@
 import { useState, useEffect, useRef } from "react";
 import {
     clearAdminAuth,
-    createTask,
     deleteTaskRecord,
     invoke,
     listTasks,
@@ -1010,283 +1009,6 @@ function App({ onAdminLogout }) {
         }
     }
 
-    function prepareTaskPayload(singleBuyer = null, specificAddress = null) {
-        if (!projectInfo || !selectedScreen || !selectedSku) {
-            throw new Error("请先选择项目、场次和票档");
-        }
-        if (!userInfo) {
-            throw new Error("请先选择账号");
-        }
-
-        // Determine buyers and address for this payload
-        const currentBuyers = singleBuyer ? [singleBuyer] : selectedBuyers;
-
-        // We need to construct buyer_info list where each buyer has the correct contact info
-        const sanitizedBuyers = currentBuyers.map(buyer => {
-            const buyerId = String(buyer.id);
-
-            // 1. Determine Address
-            let addr = specificAddress;
-            if (!addr) {
-                if (buyerAddresses[buyerId]) {
-                    addr = buyerAddresses[buyerId];
-                } else if (selectedBuyers.length === 1) {
-                    addr = selectedAddress;
-                }
-            }
-            const normAddr = normalizeAddress(addr);
-            const addrPhone = getAddressPhone(normAddr);
-
-            // 2. Determine Name & Tel
-            // Priority: Specific Input > Global Input (if single) > Address > Profile
-
-            let finalName = "";
-            let finalTel = "";
-
-            // Try specific input
-            if (buyerContactNames[buyerId]) finalName = buyerContactNames[buyerId];
-            if (buyerContactTels[buyerId]) finalTel = buyerContactTels[buyerId];
-
-            // Try global input (only if effectively single buyer context)
-            if (!finalName && selectedBuyers.length === 1) finalName = contactName;
-            if (!finalTel && selectedBuyers.length === 1) finalTel = contactTel;
-
-            // Try address
-            if (!finalName && normAddr?.name) finalName = normAddr.name;
-            if (!finalTel && addrPhone) finalTel = addrPhone;
-
-            // Try profile
-            if (!finalName && buyer.name) finalName = buyer.name;
-            if (!finalTel) finalTel = getBuyerPhone(buyer);
-
-            // 3. Construct Buyer Object
-            const newBuyer = { ...buyer };
-            if (finalName) {
-                newBuyer.name = finalName;
-                newBuyer.contact_name = finalName;
-            }
-            if (finalTel) {
-                newBuyer.tel = finalTel;
-                newBuyer.mobile = finalTel;
-                newBuyer.phone = finalTel;
-                newBuyer.contact_tel = finalTel;
-            }
-
-            // 4. Embed Deliver Info (for backend to pick up per-buyer)
-            if (normAddr) {
-                const dInfo = { ...normAddr };
-                if (finalName && !dInfo.name) dInfo.name = finalName;
-                if (finalTel) {
-                    dInfo.phone = finalTel;
-                    dInfo.tel = finalTel;
-                    dInfo.contact_tel = finalTel;
-                }
-                newBuyer.deliver_info = dInfo;
-            }
-
-            return newBuyer;
-        });
-
-        let finalTicketInfo = ticketInfo;
-
-        // Determine top-level contact info (mostly for single-buyer compatibility)
-        let topName = "";
-        let topTel = "";
-        let topDeliverInfo = {};
-
-        if (sanitizedBuyers.length > 0) {
-            // Use the first buyer's info as default for top-level
-            topName = sanitizedBuyers[0].contact_name || sanitizedBuyers[0].name;
-            topTel = sanitizedBuyers[0].contact_tel || sanitizedBuyers[0].tel;
-            if (sanitizedBuyers[0].deliver_info) {
-                topDeliverInfo = sanitizedBuyers[0].deliver_info;
-            }
-        }
-
-        const payload = {
-            project_id: String(projectId),
-            project_name: projectInfo.name,
-            screen_id: String(selectedScreen.id),
-            screen_name: selectedScreen.name,
-            sku_id: String(selectedSku.id),
-            sku_name: selectedSku.desc,
-            count: currentBuyers.length,
-            buyer_info: sanitizedBuyers,
-            deliver_info: topDeliverInfo,
-            cookies: typeof cookies === 'string' ? JSON.parse(cookies) : cookies,
-            is_hot_project: false,
-            pay_money: selectedSku.price,
-            contact_name: topName,
-            contact_tel: topTel
-        };
-
-        finalTicketInfo = JSON.stringify(payload);
-
-        return {
-            ticketInfo: finalTicketInfo,
-            interval: parseInt(requestInterval),
-            mode: parseInt(mode),
-            totalAttempts: parseInt(totalAttempts),
-            timeStart,
-            proxy,
-            timeOffset: parseFloat(timeOffset),
-            buyers: sanitizedBuyers,
-            ntpServer
-        };
-    }
-
-    function buildTaskCreatePayload() {
-        const args = prepareTaskPayload();
-        return {
-            ...args,
-            project: projectInfo?.name || projectId,
-            screen: selectedScreen?.name || "Default",
-            sku: selectedSku?.desc || "Default",
-            accountName: userInfo?.uname || "Unknown",
-        };
-    }
-
-    async function startBuy() {
-        try {
-            setLogs([]);
-            setPaymentUrl("");
-            saveProjectConfig();
-
-            if (selectedBuyers.length === 0) {
-                alert("请至少选择一个购票人");
-                return;
-            }
-
-            // Auto sync time
-            let currentOffset = timeOffset;
-            let syncLog = "";
-            try {
-                setLogs(prev => [...prev, "正在自动校准时间..."]);
-                const result = await invoke("sync_time");
-
-                let offsetValue = 0;
-                if (typeof result === 'object' && result !== null && 'diff' in result) {
-                    offsetValue = Number(result.diff);
-                    if (result.local) setNow(new Date(result.local));
-                } else {
-                    offsetValue = Number(result);
-                }
-
-                const safeOffset = Number.isFinite(offsetValue) ? offsetValue : 0;
-                updateTimeOffset(safeOffset);
-                currentOffset = safeOffset;
-                syncLog = `时间已自动校准，偏移量: ${safeOffset}ms`;
-                setLogs(prev => [...prev, syncLog]);
-            } catch (e) {
-                syncLog = "时间自动校准失败: " + e;
-                setLogs(prev => [...prev, syncLog]);
-            }
-
-            setLogs(prev => [...prev, `正在启动任务，共 ${selectedBuyers.length} 个购票人...`]);
-
-            try {
-                if (isWebRuntime) {
-                    const payload = buildTaskCreatePayload();
-                    payload.timeOffset = parseFloat(currentOffset);
-                    const createdTask = await createTask(payload);
-                    upsertTask(createdTask);
-                    setLogs(prev => [...prev, "任务已创建，正在启动..."]);
-                    setActiveTab("tasks");
-                    if (selectedBuyers.length > 1) {
-                        setViewMode("grid");
-                    }
-
-                    try {
-                        const startedTask = await startTaskRecord(createdTask.id);
-                        upsertTask(startedTask);
-                        setLogs(prev => [...prev, "✅ 任务已启动"]);
-                    } catch (err) {
-                        setLogs(prev => [...prev, `⚠️ 任务已创建，但启动失败: ${err.message || err}`]);
-                        alert(`任务已创建到列表，但启动失败: ${err.message || err}`);
-                    }
-                    return;
-                }
-
-                const args = prepareTaskPayload();
-                args.timeOffset = parseFloat(currentOffset);
-                const taskId = await invoke("start_buy", args);
-                const newTask = {
-                    id: taskId,
-                    project: projectInfo?.name || projectId,
-                    screen: selectedScreen?.name || "Default",
-                    sku: selectedSku?.desc || "Default",
-                    buyerCount: selectedBuyers.length,
-                    buyers: selectedBuyers,
-                    startTime: timeStart || new Date().toLocaleTimeString(),
-                    status: timeStart ? "scheduled" : "running",
-                    logs: [syncLog],
-                    lastLog: timeStart ? `Waiting for ${timeStart}` : `Starting for ${selectedBuyers.length} buyers...`,
-                    paymentUrl: "",
-                    accountName: userInfo?.uname || "Unknown",
-                    args: args
-                };
-
-                setTasks(prev => [newTask, ...prev]);
-                setLogs(prev => [...prev, `✅ 任务已启动`]);
-                setActiveTab("tasks");
-                if (selectedBuyers.length > 1) {
-                    setViewMode("grid");
-                }
-            } catch (err) {
-                setLogs(prev => [...prev, `❌ 启动失败: ${err.message || err}`]);
-                alert(`启动失败: ${err.message || err}`);
-            }
-
-        } catch (e) {
-            setLogs((prev) => [...prev, "启动流程异常: " + e]);
-            alert("启动流程异常: " + e);
-        }
-    }
-
-    async function saveTask() {
-        try {
-            if (selectedBuyers.length === 0) {
-                alert("请至少选择一个购票人");
-                return;
-            }
-
-            if (isWebRuntime) {
-                saveProjectConfig();
-                const createdTask = await createTask(buildTaskCreatePayload());
-                upsertTask(createdTask);
-                setActiveTab("tasks");
-                alert(`已保存任务到任务列表`);
-                return;
-            }
-
-            const args = prepareTaskPayload();
-            // Generate a temporary ID for pending task
-            const tempId = "pending-" + Date.now();
-
-            const newTask = {
-                id: tempId,
-                project: projectInfo?.name || projectId,
-                screen: selectedScreen?.name || "Default",
-                sku: selectedSku?.desc || "Default",
-                buyerCount: selectedBuyers.length,
-                buyers: selectedBuyers,
-                startTime: "-",
-                status: "pending",
-                logs: [],
-                lastLog: "Ready to start",
-                paymentUrl: "",
-                accountName: userInfo?.uname || "Unknown",
-                args: args
-            };
-
-            setTasks(prev => [newTask, ...prev]);
-            setActiveTab("tasks");
-            alert(`已保存任务到任务列表`);
-        } catch (e) {
-            alert("保存任务失败: " + e);
-        }
-    }
-
     async function runPendingTask(task) {
         try {
             if (isWebRuntime) {
@@ -1586,7 +1308,7 @@ function App({ onAdminLogout }) {
                 <nav className="flex-1 space-y-2">
                     <TabButton id="run" icon={LayoutDashboard} label="仪表盘" />
                     <TabButton id="tasks" icon={List} label="任务列表" />
-                    <TabButton id="config" icon={FileJson} label="创建任务" />
+                    <TabButton id="config" icon={FileJson} label="票务配置" />
                     <TabButton id="history" icon={History} label="抢票记录" />
                     <TabButton id="settings" icon={Settings} label="高级设置" />
                     <TabButton id="login" icon={User} label="账号管理" />
@@ -1607,7 +1329,7 @@ function App({ onAdminLogout }) {
                     <h2 className="text-lg font-semibold capitalize">
                         {activeTab === "run" && "仪表盘"}
                         {activeTab === "tasks" && "任务列表"}
-                        {activeTab === "config" && "创建任务"}
+                        {activeTab === "config" && "票务配置"}
                         {activeTab === "history" && "抢票记录"}
                         {activeTab === "settings" && "高级设置"}
                         {activeTab === "login" && "账号管理"}
@@ -1702,8 +1424,8 @@ function App({ onAdminLogout }) {
                                         <div className="w-12 h-12 bg-blue-900/50 rounded-lg flex items-center justify-center mb-4 group-hover:scale-110 transition-transform">
                                             <Rocket className="text-blue-400" size={24} />
                                         </div>
-                                        <div className="font-bold text-lg mb-1">创建任务</div>
-                                        <div className="text-xs text-gray-500">配置并启动新的抢票任务</div>
+                                        <div className="font-bold text-lg mb-1">票务配置</div>
+                                        <div className="text-xs text-gray-500">配置票务信息并生成分享链接</div>
                                     </button>
 
                                     <button
@@ -1811,7 +1533,7 @@ function App({ onAdminLogout }) {
                             <div className={viewMode === "grid" ? "flex-1 grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4 p-4 overflow-y-auto" : "grid grid-cols-1 gap-4"}>
                                 {tasks.length === 0 && (
                                     <div className="col-span-full text-center py-12 text-gray-500 bg-gray-800/50 rounded-xl border border-dashed border-gray-700">
-                                        暂无任务，请前往“创建任务”页面开始
+                                        暂无任务，请前往「票务配置」生成分享链接，待对方提交后任务将出现在此
                                     </div>
                                 )}
                                 {tasks.map(task => (
@@ -1941,7 +1663,7 @@ function App({ onAdminLogout }) {
                                 <div className="flex items-center justify-between mb-6">
                                     <h3 className="text-xl font-bold flex items-center gap-2">
                                         <FileJson className="text-blue-400" />
-                                        任务配置
+                                        票务配置
                                     </h3>
                                     <div className="flex gap-2">
                                         <input
@@ -1965,25 +1687,10 @@ function App({ onAdminLogout }) {
                                         >
                                             <Save size={16} /> 导出
                                         </button>
-                                        <button
-                                            onClick={saveTask}
-                                            className="bg-gray-700 hover:bg-gray-600 text-white px-4 py-2 rounded-lg flex items-center gap-2 font-bold border border-gray-600"
-                                        >
-                                            <Save size={20} />
-                                            保存
-                                        </button>
-                                        <button
-                                            onClick={startBuy}
-                                            className="bg-gradient-to-r from-blue-600 to-purple-600 hover:from-blue-500 hover:to-purple-500 text-white px-6 py-2 rounded-lg flex items-center gap-2 font-bold shadow-lg transform transition active:scale-95"
-                                        >
-                                            <Rocket size={20} />
-                                            立即启动
-                                        </button>
                                     </div>
                                 </div>
 
                                 <SharePresetPanel
-                                    enabled={isWebRuntime}
                                     lockedTask={buildShareLockedTask()}
                                     displaySnapshot={buildShareDisplaySnapshot()}
                                     creatorName={userInfo?.uname}
